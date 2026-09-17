@@ -1,3 +1,6 @@
+#[path = "build/payload.rs"]
+mod payload_parser;
+
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 
@@ -167,43 +170,15 @@ fn payloads_v(fp_map: &BTreeMap<i32, String>) -> BTreeMap<i32, Vec<u8>> {
     let mut payb_linenr: BTreeMap<i32, Vec<u8>> = BTreeMap::new();
 
     for (&line_nr, data) in fp_map {
-        if data.contains('\"') {
-            let start = data.find('\"').expect("payload opening \" not found");
-            let payloads = &data[start + 1..];
-            payb_linenr.insert(line_nr, parser(payloads.trim()));
+        if let Some(start) = data.find('"') {
+            let payload = payload_parser::decode_payload(&data[start..]).unwrap_or_else(|error| {
+                panic!("Invalid nmap-payloads entry {}: {}", line_nr, error)
+            });
+            payb_linenr.insert(line_nr, payload);
         }
     }
 
     payb_linenr
-}
-
-/// Converts a hexadecimal string to a Vec<u8>
-///
-/// # Arguments
-///
-/// * `payload` - A string slice containing the hexadecimal payload
-///
-/// # Returns
-///
-/// A vector of bytes representing the decoded payload
-fn parser(payload: &str) -> Vec<u8> {
-    let payload = payload.trim_matches('"');
-    let mut tmp_str = String::new();
-    let mut bytes: Vec<u8> = Vec::new();
-
-    for (idx, char) in payload.chars().enumerate() {
-        if char == '\\' && payload.chars().nth(idx + 1) == Some('x') {
-            continue;
-        } else if char.is_ascii_hexdigit() {
-            tmp_str.push(char);
-            if tmp_str.len() == 2 {
-                bytes.push(u8::from_str_radix(&tmp_str, 16).unwrap());
-                tmp_str.clear();
-            }
-        }
-    }
-
-    bytes
 }
 
 /// Combines the ports BTreeMap and the Payloads BTreeMap
