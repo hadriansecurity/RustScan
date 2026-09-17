@@ -1,3 +1,6 @@
+#[path = "build/payload.rs"]
+mod payload_parser;
+
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 
@@ -167,103 +170,15 @@ fn payloads_v(fp_map: &BTreeMap<i32, String>) -> BTreeMap<i32, Vec<u8>> {
     let mut payb_linenr: BTreeMap<i32, Vec<u8>> = BTreeMap::new();
 
     for (&line_nr, data) in fp_map {
-        if data.contains('\"') {
-            let start = data.find('\"').expect("payload opening \" not found");
-            let payloads = &data[start + 1..];
-            payb_linenr.insert(line_nr, parser(payloads.trim()));
+        if let Some(start) = data.find('"') {
+            let payload = payload_parser::decode_payload(&data[start..]).unwrap_or_else(|error| {
+                panic!("Invalid nmap-payloads entry {}: {}", line_nr, error)
+            });
+            payb_linenr.insert(line_nr, payload);
         }
     }
 
     payb_linenr
-}
-
-/// Decodes a payload literal from `nmap-payloads` into the bytes to put on the wire.
-///
-/// An entry's payload is one or more double-quoted strings, which the caller has
-/// already joined together. Inside a quoted string, `\xNN` and the usual C escapes
-/// denote a single byte and every other character stands for itself -- SNMP's
-/// community string is written literally as `public`, and SSDP's probe is literal
-/// HTTP. Whitespace and the quotes separating concatenated strings are structure,
-/// not payload, so they are skipped.
-///
-/// # Arguments
-///
-/// * `payload` - The joined payload literals, starting just after the first `"`
-///
-/// # Returns
-///
-/// A vector of the bytes the payload denotes
-fn parser(payload: &str) -> Vec<u8> {
-    let chars: Vec<char> = payload.chars().collect();
-    let mut bytes: Vec<u8> = Vec::new();
-    // The caller slices from just past the opening quote, so we start inside one.
-    let mut in_quotes = true;
-    let mut i = 0;
-
-    while i < chars.len() {
-        let char = chars[i];
-
-        if char == '"' {
-            in_quotes = !in_quotes;
-            i += 1;
-            continue;
-        }
-
-        if !in_quotes {
-            i += 1;
-            continue;
-        }
-
-        if char == '\\' && i + 1 < chars.len() {
-            match chars[i + 1] {
-                'x' if i + 3 < chars.len() => {
-                    let hex: String = chars[i + 2..i + 4].iter().collect();
-                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                        bytes.push(byte);
-                        i += 4;
-                        continue;
-                    }
-                }
-                'n' => {
-                    bytes.push(b'\n');
-                    i += 2;
-                    continue;
-                }
-                'r' => {
-                    bytes.push(b'\r');
-                    i += 2;
-                    continue;
-                }
-                't' => {
-                    bytes.push(b'\t');
-                    i += 2;
-                    continue;
-                }
-                '0' => {
-                    bytes.push(0);
-                    i += 2;
-                    continue;
-                }
-                '\\' => {
-                    bytes.push(b'\\');
-                    i += 2;
-                    continue;
-                }
-                '"' => {
-                    bytes.push(b'"');
-                    i += 2;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-
-        let mut buf = [0u8; 4];
-        bytes.extend_from_slice(char.encode_utf8(&mut buf).as_bytes());
-        i += 1;
-    }
-
-    bytes
 }
 
 /// Combines the ports BTreeMap and the Payloads BTreeMap

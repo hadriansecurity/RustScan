@@ -3,6 +3,9 @@
 //! protocol. These tests pin the bytes for probes whose payloads are written as
 //! literal text rather than `\xNN` escapes, which is where decoding goes wrong.
 
+#[path = "../build/payload.rs"]
+mod payload_parser;
+
 use rustscan::generated::get_parsed_data;
 
 /// Every payload registered for `port`.
@@ -28,7 +31,8 @@ fn snmp_probe_carries_the_community_string() {
     // an octet string longer than the message -- agents discard it in silence.
     assert!(
         payloads.iter().any(|p| contains(p, b"public")),
-        "udp/161 payloads lost the community string: {payloads:02x?}"
+        "udp/161 payloads lost the community string: {:02x?}",
+        payloads
     );
 }
 
@@ -69,7 +73,11 @@ fn text_probes_survive_decoding() {
         (427, b"service:service-agent".as_slice()),
     ] {
         let payloads = payloads_for(port);
-        assert!(!payloads.is_empty(), "no payload registered for udp/{port}");
+        assert!(
+            !payloads.is_empty(),
+            "no payload registered for udp/{}",
+            port
+        );
         assert!(
             payloads.iter().any(|p| contains(p, needle)),
             "udp/{port} payload lost {:?}",
@@ -90,7 +98,8 @@ fn escape_sequences_still_decode_to_single_bytes() {
         payloads
             .iter()
             .any(|p| matches!(p.first(), Some(0xE3 | 0xD9))),
-        "udp/123 payload does not start with an NTP LI/VN/Mode byte: {payloads:02x?}"
+        "udp/123 payload does not start with an NTP LI/VN/Mode byte: {:02x?}",
+        payloads
     );
     assert!(
         payloads.iter().all(|p| !contains(p, b"\\x")),
