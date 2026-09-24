@@ -142,11 +142,11 @@ fn generated_variants_are_unique_and_shared_across_ports() {
             assert!(!payloads[..index].contains(payload));
         }
     }
-    let first = payloads_for(65534)[0];
+    let first = payloads_for(2049)[0];
     let last = payloads_for(65535)[0];
     assert!(
         std::ptr::eq(first, last),
-        "broad-range payload bytes must be shared"
+        "RPC payload bytes must be shared across separate port ranges"
     );
 }
 

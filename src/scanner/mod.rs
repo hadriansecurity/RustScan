@@ -219,14 +219,12 @@ impl Scanner {
         UdpSocket::bind(local_addr).await
     }
 
-    /// Send all distinct variants back-to-back, then wait for any response.
-    /// One timeout bounds sending and receiving per attempt; variants do not
-    /// introduce separate waits or artificial delays. An empty list sends one
-    /// empty datagram. Retaining the socket across retries accepts late replies
-    /// to previous attempts. Confirmation stops retries, not the current burst.
+    /// Send all variants back-to-back under one timeout per attempt.
+    /// Keep the socket across retries so late replies still count.
     async fn udp_scan(&self, socket: SocketAddr, payloads: &[&[u8]]) -> io::Result<bool> {
+        const EMPTY_PROBE: &[&[u8]] = &[&[]];
         let payloads = if payloads.is_empty() {
-            &[&[][..]][..]
+            EMPTY_PROBE
         } else {
             payloads
         };
