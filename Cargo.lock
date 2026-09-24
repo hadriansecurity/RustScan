@@ -1788,7 +1788,6 @@ dependencies = [
  "hickory-resolver",
  "itertools 0.15.0",
  "log",
- "once_cell",
  "parameterized",
  "rand 0.10.2",
  "rlimit",
