@@ -72,3 +72,31 @@ fn invalid_entries_fail_with_the_source_line_instead_of_losing_coverage() {
         assert!(error.starts_with("line 2:"), "{}", error);
     }
 }
+
+#[test]
+fn generated_lookup_matches_every_vendored_entry_and_gap() {
+    use std::collections::BTreeMap;
+    let entries = parse(include_str!("../nmap-payloads")).unwrap();
+    let mut expected: BTreeMap<u16, Vec<Vec<u8>>> = BTreeMap::new();
+    for entry in entries {
+        for port in entry.ports {
+            let variants = expected.entry(port).or_default();
+            if !variants.contains(&entry.payload) {
+                variants.push(entry.payload.clone());
+            }
+        }
+    }
+    for port in 0..=u16::MAX {
+        let variants: Vec<&[u8]> = expected
+            .get(&port)
+            .into_iter()
+            .flatten()
+            .map(Vec::as_slice)
+            .collect();
+        assert_eq!(
+            rustscan::generated::payloads_for(port),
+            variants,
+            "udp/{port}"
+        );
+    }
+}

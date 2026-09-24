@@ -1,8 +1,7 @@
 //! Core functionality for actual scanning behaviour.
-use crate::generated::get_parsed_data;
+use crate::generated::payloads_for;
 use crate::port_strategy::PortStrategy;
 use log::debug;
-use std::convert::TryFrom;
 
 mod socket_iterator;
 use socket_iterator::SocketIterator;
@@ -16,7 +15,7 @@ use std::{
     collections::HashSet,
     net::{IpAddr, Shutdown, SocketAddr},
     num::NonZeroU8,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// The class for the scanner
@@ -165,11 +164,7 @@ impl Scanner {
     }
 
     async fn scan_udp_socket(&self, socket: SocketAddr) -> io::Result<SocketAddr> {
-        let payloads = get_parsed_data()
-            .get(&socket.port())
-            .map(Vec::as_slice)
-            .unwrap_or(&[&[]]);
-        if self.udp_scan(socket, payloads).await? {
+        if self.udp_scan(socket, payloads_for(socket.port())).await? {
             self.fmt_ports(socket);
             return Ok(socket);
         }
@@ -224,52 +219,38 @@ impl Scanner {
         UdpSocket::bind(local_addr).await
     }
 
-    /// Probe distinct variants in database order within one timeout per attempt.
-    /// Keep the same socket across variants and retries so late replies remain valid.
+    /// Send all distinct variants back-to-back, then wait for any response.
+    /// One timeout bounds sending and receiving per attempt; variants do not
+    /// introduce separate waits or artificial delays. An empty list sends one
+    /// empty datagram. Retaining the socket across retries accepts late replies
+    /// to previous attempts. Confirmation stops retries, not the current burst.
     async fn udp_scan(&self, socket: SocketAddr, payloads: &[&[u8]]) -> io::Result<bool> {
+        let payloads = if payloads.is_empty() {
+            &[&[][..]][..]
+        } else {
+            payloads
+        };
         let udp_socket = self.udp_bind(socket).await?;
         udp_socket.connect(socket).await?;
-        for _ in 0..self.tries.get() {
-            // The outer timeout also bounds time spent sending. Variants share
-            // the existing attempt budget instead of each adding a full timeout.
-            match io::timeout(self.timeout, self.udp_probe_attempt(&udp_socket, payloads)).await {
-                Ok(found) => return Ok(found),
-                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(false)
-    }
-
-    async fn udp_probe_attempt(&self, socket: &UdpSocket, payloads: &[&[u8]]) -> io::Result<bool> {
-        let start = Instant::now();
-        let interval = self.timeout / u32::try_from(payloads.len()).expect("UDP probe count");
         let mut buf = [0u8; 1024];
-        for (index, payload) in payloads.iter().enumerate() {
-            socket.send(payload).await?;
-            let end = if index + 1 == payloads.len() {
-                start + self.timeout
-            } else {
-                start + interval * (index as u32 + 1)
-            };
-            match io::timeout(
-                end.saturating_duration_since(Instant::now()),
-                socket.recv(&mut buf),
-            )
+        for _ in 0..self.tries.get() {
+            match io::timeout(self.timeout, async {
+                for payload in payloads {
+                    udp_socket.send(payload).await?;
+                }
+                udp_socket.recv(&mut buf).await
+            })
             .await
             {
                 Ok(size) => {
                     debug!("Received {size} bytes");
                     return Ok(true);
                 }
-                Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
                 Err(e) => return Err(e),
             }
         }
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "UDP probe deadline",
-        ))
+        Ok(false)
     }
 
     /// Formats and prints the port status

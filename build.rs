@@ -3,7 +3,7 @@ mod database;
 #[path = "build/payload.rs"]
 mod payload_parser;
 
-use std::{env, fmt::Write, fs, path::PathBuf};
+use std::{collections::BTreeMap, env, fmt::Write, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=nmap-payloads");
@@ -12,28 +12,58 @@ fn main() {
     let data = fs::read_to_string("nmap-payloads").expect("read nmap-payloads");
     let entries = database::parse(&data).expect("invalid nmap-payloads");
 
-    // Payload bytes are static and shared, even for the broad RPC port range.
-    // Only UDP scans initialize the per-port index; no scan clones the table.
-    let mut code = String::from(
-        "use std::collections::BTreeMap;\n\
-         use once_cell::sync::Lazy;\n\
-         pub type PayloadMap = BTreeMap<u16, Vec<&'static [u8]>>;\n\
-         fn generated_data() -> PayloadMap {\n\
-         let mut map = PayloadMap::new();\n",
-    );
+    let mut payloads = Vec::new();
+    let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
     for entry in entries {
-        writeln!(code, "let payload: &'static [u8] = &{:?};", entry.payload).unwrap();
-        writeln!(code, "for port in {:?} {{", entry.ports).unwrap();
-        code.push_str(
-            "let variants = map.entry(port).or_default();\n\
-             if !variants.contains(&payload) { variants.push(payload); }\n}\n",
-        );
+        let index = match payloads
+            .iter()
+            .position(|payload| *payload == entry.payload)
+        {
+            Some(index) => index,
+            None => {
+                payloads.push(entry.payload);
+                payloads.len() - 1
+            }
+        };
+        for port in entry.ports {
+            let variants = ports.entry(port).or_default();
+            if !variants.contains(&index) {
+                variants.push(index);
+            }
+        }
     }
-    code.push_str(
-        "map\n}\n\
-         static PARSED_DATA: Lazy<PayloadMap> = Lazy::new(generated_data);\n\
-         pub fn get_parsed_data() -> &'static PayloadMap { &PARSED_DATA }\n",
-    );
+
+    // Merge only adjacent ports with identical variant lists. Overlapping input
+    // ranges must retain their combined probes rather than shadowing each other.
+    let mut ranges: Vec<(u16, u16, Vec<usize>)> = Vec::new();
+    for (port, variants) in ports {
+        if let Some((_, end, previous)) = ranges.last_mut() {
+            if end.checked_add(1) == Some(port) && *previous == variants {
+                *end = port;
+                continue;
+            }
+        }
+        ranges.push((port, port, variants));
+    }
+
+    let mut code = String::new();
+    for (index, payload) in payloads.iter().enumerate() {
+        writeln!(code, "static PAYLOAD_{index}: &[u8] = &{payload:?};").unwrap();
+    }
+    code.push_str("pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {\nmatch port {\n");
+    for (start, end, variants) in ranges {
+        let variants = variants
+            .iter()
+            .map(|index| format!("PAYLOAD_{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            code,
+            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{variants}]; PROBES }},"
+        )
+        .unwrap();
+    }
+    code.push_str("_ => &[],\n}\n}\n");
     let dest = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("udp_payloads.rs");
     fs::write(dest, code).expect("write generated UDP table");
 }

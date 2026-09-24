@@ -16,35 +16,36 @@ fn scanner(timeout: Duration, tries: u8) -> Scanner {
     )
 }
 
+async fn receive(server: &UdpSocket) -> (Vec<u8>, SocketAddr) {
+    let mut buf = [0; 64];
+    let (size, peer) = io::timeout(Duration::from_secs(5), server.recv_from(&mut buf))
+        .await
+        .unwrap();
+    (buf[..size].to_vec(), peer)
+}
+
 #[test]
 fn udp_detects_a_response_to_each_variant_including_empty_replies() {
     block_on(async {
         for address in ["127.0.0.1:0", "[::1]:0"] {
-            for accepted in 0..3 {
+            for accepted in 0..4 {
                 let server = UdpSocket::bind(address).await.unwrap();
                 let target = server.local_addr().unwrap();
+                let payloads: &[&[u8]] = &[b"first", b"second", b"third", b"fourth"];
                 let responder = spawn(async move {
-                    let mut buf = [0; 16];
                     let mut peers = Vec::new();
-                    for expected in 0..=accepted {
-                        let (size, peer) =
-                            io::timeout(Duration::from_secs(3), server.recv_from(&mut buf))
-                                .await
-                                .unwrap();
-                        assert_eq!(
-                            &buf[..size],
-                            [b"first".as_slice(), b"second", b"third"][expected]
-                        );
+                    for (index, expected) in payloads.iter().enumerate() {
+                        let (payload, peer) = receive(&server).await;
+                        assert_eq!(payload, *expected);
                         peers.push(peer);
+                        if index == accepted {
+                            server.send_to(&[], peer).await.unwrap();
+                        }
                     }
-                    server.send_to(&[], peers[0]).await.unwrap();
-                    let extra =
-                        io::timeout(Duration::from_millis(350), server.recv_from(&mut buf)).await;
-                    assert!(extra.is_err(), "must stop sending after confirmation");
                     assert!(peers.iter().all(|peer| *peer == peers[0]));
                 });
-                assert!(scanner(Duration::from_millis(600), 1)
-                    .udp_scan(target, &[b"first", b"second", b"third"])
+                assert!(scanner(Duration::from_secs(2), 2)
+                    .udp_scan(target, payloads)
                     .await
                     .unwrap());
                 responder.await;
@@ -54,54 +55,78 @@ fn udp_detects_a_response_to_each_variant_including_empty_replies() {
 }
 
 #[test]
-fn udp_accepts_late_replies_across_variants_and_attempts() {
+fn udp_last_variant_has_the_response_window_without_staggering() {
     block_on(async {
-        for (variants, tries) in [(true, 1), (false, 2)] {
-            let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            let target = server.local_addr().unwrap();
-            let responder = spawn(async move {
-                let mut buf = [0; 16];
-                let (_, first) = server.recv_from(&mut buf).await.unwrap();
-                sleep(Duration::from_millis(300)).await;
-                server.send_to(b"late", first).await.unwrap();
-                let (_, next) = server.recv_from(&mut buf).await.unwrap();
-                assert_eq!(first, next, "variants/retries must retain the source port");
-            });
-            let (timeout, payloads): (_, &[&[u8]]) = if variants {
-                (Duration::from_millis(600), &[b"first", b"second", b"third"])
-            } else {
-                (Duration::from_millis(200), &[b"first"])
-            };
-            assert!(scanner(timeout, tries)
-                .udp_scan(target, payloads)
-                .await
-                .unwrap());
-            responder.await;
-        }
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let responder = spawn(async move {
+            for expected in [b"first".as_slice(), b"second", b"third"] {
+                assert_eq!(receive(&server).await.0, expected);
+            }
+            let (payload, peer) = receive(&server).await;
+            assert_eq!(payload, b"fourth");
+            // Half the attempt window: a staggered fourth probe would only
+            // have one quarter remaining. The one-second margin tolerates CI load.
+            sleep(Duration::from_secs(1)).await;
+            server.send_to(b"response", peer).await.unwrap();
+        });
+        assert!(scanner(Duration::from_secs(2), 1)
+            .udp_scan(target, &[b"first", b"second", b"third", b"fourth"])
+            .await
+            .unwrap());
+        responder.await;
+    });
+}
+
+#[test]
+fn udp_accepts_a_reply_to_the_first_attempt_after_the_retry_arrives() {
+    block_on(async {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let responder = spawn(async move {
+            let (payload, first) = receive(&server).await;
+            assert_eq!(payload, b"probe");
+            // The retry packet is the synchronization point; no sleep guesses
+            // when the first attempt has expired.
+            let (payload, next) = receive(&server).await;
+            assert_eq!(payload, b"probe");
+            assert_eq!(first, next, "retries must retain the source port");
+            server.send_to(b"late", first).await.unwrap();
+        });
+        assert!(scanner(Duration::from_secs(1), 2)
+            .udp_scan(target, &[b"probe"])
+            .await
+            .unwrap());
+        responder.await;
     });
 }
 
 #[test]
 fn udp_silent_ports_have_a_fixed_time_and_packet_budget() {
     block_on(async {
-        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let target = server.local_addr().unwrap();
-        let start = Instant::now();
-        let payloads: &[&[u8]] = &[b"a", b"b", b"c", b"d", b"e"];
-        assert!(!scanner(Duration::from_millis(200), 2)
-            .udp_scan(target, payloads)
-            .await
-            .unwrap());
-        // A timeout per payload would take two seconds, instead of ~400 ms.
-        assert!(start.elapsed() < Duration::from_millis(1200));
+        let payloads: &[&[u8]] = &[b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h"];
+        // Normal completion is ~500 ms. A timeout per payload would take four
+        // seconds; the outer test bound allows substantial scheduling slack.
+        let found = io::timeout(
+            Duration::from_secs(2),
+            scanner(Duration::from_millis(250), 2).udp_scan(target, payloads),
+        )
+        .await
+        .unwrap();
+        assert!(!found);
+        server.set_nonblocking(true).unwrap();
         let mut packets = Vec::new();
         let mut buf = [0; 16];
-        while let Ok((size, peer)) =
-            io::timeout(Duration::from_millis(20), server.recv_from(&mut buf)).await
-        {
-            packets.push((buf[..size].to_vec(), peer));
+        loop {
+            match server.recv_from(&mut buf) {
+                Ok((size, peer)) => packets.push((buf[..size].to_vec(), peer)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("receive failed: {}", e),
+            }
         }
-        assert_eq!(packets.len(), 10);
+        assert_eq!(packets.len(), payloads.len() * 2);
         for (index, (payload, peer)) in packets.iter().enumerate() {
             assert_eq!(payload, payloads[index % payloads.len()]);
             assert_eq!(*peer, packets[0].1);
@@ -110,20 +135,21 @@ fn udp_silent_ports_have_a_fixed_time_and_packet_budget() {
 }
 
 #[test]
-fn udp_empty_probe_fallback_still_detects_a_listener() {
+fn udp_empty_probe_fallback_and_explicit_empty_payload_detect_a_listener() {
     block_on(async {
-        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let target = server.local_addr().unwrap();
-        let responder = spawn(async move {
-            let mut buf = [0; 16];
-            let (size, peer) = server.recv_from(&mut buf).await.unwrap();
-            assert_eq!(size, 0);
-            server.send_to(b"response", peer).await.unwrap();
-        });
-        assert!(scanner(Duration::from_secs(1), 1)
-            .udp_scan(target, &[&[]])
-            .await
-            .unwrap());
-        responder.await;
+        for payloads in [&[][..], &[&[][..]][..]] {
+            let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let target = server.local_addr().unwrap();
+            let responder = spawn(async move {
+                let (payload, peer) = receive(&server).await;
+                assert!(payload.is_empty());
+                server.send_to(b"response", peer).await.unwrap();
+            });
+            assert!(scanner(Duration::from_secs(2), 1)
+                .udp_scan(target, payloads)
+                .await
+                .unwrap());
+            responder.await;
+        }
     });
 }

@@ -6,12 +6,7 @@
 #[path = "../build/payload.rs"]
 mod payload_parser;
 
-use rustscan::generated::get_parsed_data;
-
-/// Every payload registered for `port`.
-fn payloads_for(port: u16) -> Vec<&'static [u8]> {
-    get_parsed_data().get(&port).cloned().unwrap_or_default()
-}
+use rustscan::generated::payloads_for;
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
@@ -35,7 +30,7 @@ fn snmp_probe_carries_the_community_string() {
 #[test]
 fn snmp_probe_is_well_formed_ber() {
     let payload = payloads_for(161)
-        .into_iter()
+        .iter()
         .find(|p| contains(p, b"public"))
         .expect("no SNMP payload carrying a community string");
 
@@ -141,7 +136,8 @@ fn overlapping_dns_and_shared_snmp_keys_preserve_variants() {
 
 #[test]
 fn generated_variants_are_unique_and_shared_across_ports() {
-    for payloads in get_parsed_data().values() {
+    for port in 0..=u16::MAX {
+        let payloads = payloads_for(port);
         for (index, payload) in payloads.iter().enumerate() {
             assert!(!payloads[..index].contains(payload));
         }
@@ -156,9 +152,18 @@ fn generated_variants_are_unique_and_shared_across_ports() {
 
 #[test]
 fn vendored_database_coverage_and_packet_budget_are_preserved() {
-    let table = get_parsed_data();
-    assert_eq!(table.len(), 33_053);
-    assert_eq!(table.values().map(Vec::len).sum::<usize>(), 33_077);
-    assert_eq!(table.values().filter(|probes| probes.len() > 1).count(), 20);
-    assert_eq!(table.values().map(Vec::len).max(), Some(4));
+    let counts: Vec<_> = (0..=u16::MAX)
+        .map(|port| payloads_for(port).len())
+        .collect();
+    let actual = (
+        counts.iter().filter(|&&count| count > 0).count(),
+        counts.iter().sum::<usize>(),
+        counts.iter().filter(|&&count| count > 1).count(),
+        counts.iter().max().copied(),
+    );
+    assert_eq!(
+        actual,
+        (33_053, 33_077, 20, Some(4)),
+        "probe coverage changed: investigate lost probes or update after syncing nmap-payloads"
+    );
 }
