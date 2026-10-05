@@ -1,5 +1,5 @@
 //! Core functionality for actual scanning behaviour.
-use crate::generated::get_parsed_data;
+use crate::generated::payloads_for;
 use crate::port_strategy::PortStrategy;
 use crate::tui::println_safe;
 use log::debug;
@@ -12,15 +12,12 @@ use errors::{diagnostic_error, is_descriptor_exhaustion, ScanErrors};
 
 use colored::Colorize;
 use futures::stream::{FuturesUnordered, StreamExt};
-use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::task::Poll;
 use std::{
-    collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr},
     num::NonZeroU8,
-    sync::Arc,
     time::Duration,
 };
 use tokio::io::Interest;
@@ -56,28 +53,6 @@ fn filter_excluded_ports(mut ports: Vec<u16>, excluded: &[u16]) -> Vec<u16> {
     }
     ports.retain(|&port| excluded_bits[usize::from(port) / 64] & (1 << (port % 64)) == 0);
     ports
-}
-
-/// UDP payload lookup: port -> payload bytes
-///
-/// `get_parsed_data()` returns a `&'static BTreeMap<...>`, so we can store
-/// references to the payload bytes without cloning them.
-#[doc(hidden)]
-pub type UdpPayloadLookup = HashMap<u16, &'static [u8]>;
-
-#[doc(hidden)]
-pub fn build_udp_payload_lookup(udp_map: &'static BTreeMap<Vec<u16>, Vec<u8>>) -> UdpPayloadLookup {
-    let mut lookup: UdpPayloadLookup = HashMap::new();
-
-    for (ports, payload_vec) in udp_map.iter() {
-        let payload: &'static [u8] = payload_vec.as_slice();
-        for &port in ports.iter() {
-            // Preserve existing behavior: if duplicates exist, last insert wins.
-            lookup.insert(port, payload);
-        }
-    }
-
-    lookup
 }
 
 /// The class for the scanner
@@ -221,15 +196,6 @@ impl Scanner {
         let mut errors =
             ScanErrors::new(log::log_enabled!(log::Level::Debug), self.ips.len() * 1000);
 
-        // Build UDP payload lookup once (only if we are scanning UDP).
-        // This avoids cloning a big map into every spawned future and turns
-        // payload selection from O(n) to O(1).
-        let udp_payloads: Option<Arc<UdpPayloadLookup>> = if self.udp {
-            Some(Arc::new(build_udp_payload_lookup(get_parsed_data())))
-        } else {
-            None
-        };
-
         debug!("Start scanning sockets. \nBatch size {}\nNumber of ip-s {}\nNumber of ports {}\nTargets all together {}\nInterval between ports {:?}",
             self.batch_size,
             self.ips.len(),
@@ -239,7 +205,7 @@ impl Scanner {
 
         if self.interval.is_zero() {
             let sockets = SocketIterator::new(&self.ips, &ports);
-            self.scan_sockets(sockets, &udp_payloads, &mut found_sockets, &mut errors)
+            self.scan_sockets(sockets, &mut found_sockets, &mut errors)
                 .await;
         } else {
             // Scan one port (on every address) at a time and wait `interval`
@@ -249,7 +215,7 @@ impl Scanner {
                     sleep(self.interval).await;
                 }
                 let sockets = SocketIterator::new(&self.ips, std::slice::from_ref(port));
-                self.scan_sockets(sockets, &udp_payloads, &mut found_sockets, &mut errors)
+                self.scan_sockets(sockets, &mut found_sockets, &mut errors)
                     .await;
             }
         }
@@ -273,7 +239,6 @@ impl Scanner {
     async fn scan_sockets(
         &self,
         mut sockets: SocketIterator<'_>,
-        udp_payloads: &Option<Arc<UdpPayloadLookup>>,
         found_sockets: &mut Vec<PortStatus>,
         errors: &mut ScanErrors,
     ) {
@@ -285,7 +250,7 @@ impl Scanner {
                 let mut started = false;
                 if ftrs.len() < self.batch_size {
                     if let Some(socket) = sockets.next() {
-                        ftrs.push(self.scan_socket(socket, udp_payloads.clone()));
+                        ftrs.push(self.scan_socket(socket));
                         started = true;
                         work += 1;
                     }
@@ -345,13 +310,9 @@ impl Scanner {
     /// ```
     ///
     /// Note: `self` must contain `self.ip`.
-    async fn scan_socket(
-        &self,
-        socket: SocketAddr,
-        udp_payloads: Option<Arc<UdpPayloadLookup>>,
-    ) -> io::Result<PortStatus> {
+    async fn scan_socket(&self, socket: SocketAddr) -> io::Result<PortStatus> {
         if self.udp {
-            return self.scan_udp_socket(socket, udp_payloads).await;
+            return self.scan_udp_socket(socket).await;
         }
 
         let tries = self.tries.get();
@@ -390,25 +351,10 @@ impl Scanner {
         unreachable!();
     }
 
-    async fn scan_udp_socket(
-        &self,
-        socket: SocketAddr,
-        udp_payloads: Option<Arc<UdpPayloadLookup>>,
-    ) -> io::Result<PortStatus> {
-        let payload: &[u8] = udp_payloads
-            .as_ref()
-            .and_then(|m| m.get(&socket.port()).copied())
-            .unwrap_or(b"");
-
-        let tries = self.tries.get();
-        for _ in 1..=tries {
-            match self.udp_scan(socket, payload, self.timeout).await {
-                Ok(true) => return Ok(PortStatus::Open(socket)),
-                Ok(false) => continue,
-                Err(e) => return Err(e),
-            }
+    async fn scan_udp_socket(&self, socket: SocketAddr) -> io::Result<PortStatus> {
+        if self.udp_scan(socket, payloads_for(socket.port())).await? {
+            return Ok(PortStatus::Open(socket));
         }
-
         Err(io::Error::other(format!(
             "UDP scan timed-out for all tries on socket {socket}"
         )))
@@ -447,27 +393,20 @@ impl Scanner {
         Ok(udp_socket)
     }
 
-    /// Performs a UDP scan on the specified socket with a payload and wait duration
-    /// # Example
+    /// Sends every probe variant back-to-back, then waits for any reply, with
+    /// one timeout per attempt covering both. The socket is kept across
+    /// retries so a late reply to an earlier attempt still counts.
     ///
-    /// ```compile_fail
-    /// # use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-    /// # use std::time::Duration;
-    /// let port: u16 = 123;
-    /// // ip is an IpAddr type
-    /// let ip = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
-    /// let socket = SocketAddr::new(ip, port);
-    /// let payload = vec![0, 1, 2, 3];
-    /// let wait = Duration::from_secs(1);
-    /// let result = scanner.udp_scan(socket, payload, wait).await;
-    /// // returns Result which is either Ok(true) if response received, or Ok(false) if timed out.
-    /// // Err is returned for other I/O errors.
-    async fn udp_scan(
-        &self,
-        socket: SocketAddr,
-        payload: &[u8],
-        wait: Duration,
-    ) -> io::Result<bool> {
+    /// Returns `Ok(true)` on a reply, `Ok(false)` when every attempt timed out
+    /// and `Err` for other I/O errors, such as an ICMP "port unreachable".
+    async fn udp_scan(&self, socket: SocketAddr, payloads: &[&[u8]]) -> io::Result<bool> {
+        const EMPTY_PROBE: &[&[u8]] = &[&[]];
+        let payloads = if payloads.is_empty() {
+            EMPTY_PROBE
+        } else {
+            payloads
+        };
+
         let udp_socket = match Self::udp_bind(socket) {
             Ok(udp_socket) => udp_socket,
             Err(e) => {
@@ -479,20 +418,23 @@ impl Scanner {
 
         udp_socket.connect(socket)?;
 
-        // Send the probe and try the first receive straight away, as
+        // Send the probes and try the first receive straight away, as
         // async-std did. Tokio's readiness-based I/O would first wait for the
         // reactor to report the socket ready, costing every probe extra trips
-        // through the event loop, while the probe can almost always be sent
+        // through the event loop, while the probes can almost always be sent
         // immediately and, on the local host, the answer (often an ICMP "port
         // unreachable", seen as a refused connection) is usually already
-        // there when the send returns. The socket is only registered with
+        // there when the sends return. The socket is only registered with
         // Tokio when we really have to wait.
-        let sent = match udp_socket.send(payload) {
-            Ok(_) => true,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
-            Err(e) => return Err(e),
-        };
-        let early = if sent {
+        let mut unsent = payloads;
+        while let Some((payload, rest)) = unsent.split_first() {
+            match udp_socket.send(payload) {
+                Ok(_) => unsent = rest,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        let early = if unsent.is_empty() {
             udp_socket.recv(&mut buf)
         } else {
             Err(io::ErrorKind::WouldBlock.into())
@@ -501,14 +443,25 @@ impl Scanner {
         let received = match early {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 let udp_socket = UdpSocket::from_std(udp_socket)?;
-                if !sent {
-                    udp_socket.send(payload).await?;
+                let mut received = None;
+                for attempt in 0..self.tries.get() {
+                    let probes = if attempt == 0 { unsent } else { payloads };
+                    let exchange = async {
+                        for payload in probes {
+                            udp_socket.send(payload).await?;
+                        }
+                        recv_or_error(&udp_socket, &mut buf).await
+                    };
+                    if let Ok(result) = timeout(self.timeout, exchange).await {
+                        received = Some(result);
+                        break;
+                    }
                 }
-                match timeout(wait, recv_or_error(&udp_socket, &mut buf)).await {
-                    Ok(received) => received,
-                    // Nothing came back in time.
-                    Err(_elapsed) => return Ok(false),
-                }
+                // Nothing came back in time.
+                let Some(received) = received else {
+                    return Ok(false);
+                };
+                received
             }
             early => early,
         };
@@ -747,17 +700,12 @@ mod tests {
     /// decoding mangled it into a 28-byte probe that agents never answered.
     #[test]
     fn udp_snmp_probe_bytes_match_nmap() {
-        let payload = get_parsed_data()
-            .iter()
-            .find(|(ports, _)| ports.contains(&161))
-            .map(|(_, payload)| payload)
-            .expect("no UDP payload registered for port 161");
-        let expected: Vec<u8> = vec![
+        let expected: &[u8] = &[
             0x30, 0x1f, 0x02, 0x01, 0x00, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa1,
             0x12, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x07, 0x30, 0x05,
             0x06, 0x01, 0x00, 0x05, 0x00,
         ];
-        assert_eq!(*payload, expected);
+        assert!(payloads_for(161).contains(&expected));
     }
 
     /// The SSDP probe mixes `\xNN` escapes, `\"` escapes and literal text
@@ -765,14 +713,177 @@ mod tests {
     /// with no separators.
     #[test]
     fn udp_ssdp_probe_decodes_escapes_and_literal_text() {
-        let payload = get_parsed_data()
-            .iter()
-            .find(|(ports, _)| ports.contains(&1900))
-            .map(|(_, payload)| payload)
-            .expect("no UDP payload registered for port 1900");
-        let expected =
-            b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 5\r\nST: ssdp:all\r\n\r\n"
-                .to_vec();
-        assert_eq!(*payload, expected);
+        let expected: &[u8] =
+            b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 5\r\nST: ssdp:all\r\n\r\n";
+        assert_eq!(payloads_for(1900), [expected]);
+    }
+
+    mod udp {
+        use super::*;
+        use crate::input::ScanOrder;
+        use std::future::Future;
+        use tokio::task::spawn;
+
+        fn block_on<F: Future>(future: F) -> F::Output {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(future)
+        }
+
+        fn scanner(timeout: Duration, tries: u8) -> Scanner {
+            Scanner::new(
+                &[],
+                1,
+                timeout,
+                tries,
+                true,
+                PortStrategy::pick(&None, Some(vec![53]), ScanOrder::Serial),
+                true,
+                vec![],
+                true,
+            )
+        }
+
+        async fn receive(server: &UdpSocket) -> (Vec<u8>, SocketAddr) {
+            let mut buf = [0; 64];
+            let (size, peer) = timeout(Duration::from_secs(5), server.recv_from(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            (buf[..size].to_vec(), peer)
+        }
+
+        #[test]
+        fn udp_detects_a_response_to_each_variant_including_empty_replies() {
+            block_on(async {
+                for address in ["127.0.0.1:0", "[::1]:0"] {
+                    for accepted in 0..4 {
+                        let server = UdpSocket::bind(address).await.unwrap();
+                        let target = server.local_addr().unwrap();
+                        let payloads: &[&[u8]] = &[b"first", b"second", b"third", b"fourth"];
+                        let responder = spawn(async move {
+                            let mut peers = Vec::new();
+                            for (index, expected) in payloads.iter().enumerate() {
+                                let (payload, peer) = receive(&server).await;
+                                assert_eq!(payload, *expected);
+                                peers.push(peer);
+                                if index == accepted {
+                                    server.send_to(&[], peer).await.unwrap();
+                                }
+                            }
+                            assert!(peers.iter().all(|peer| *peer == peers[0]));
+                        });
+                        assert!(scanner(Duration::from_secs(2), 2)
+                            .udp_scan(target, payloads)
+                            .await
+                            .unwrap());
+                        responder.await.unwrap();
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn udp_last_variant_has_the_response_window_without_staggering() {
+            block_on(async {
+                let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let target = server.local_addr().unwrap();
+                let responder = spawn(async move {
+                    for expected in [b"first".as_slice(), b"second", b"third"] {
+                        assert_eq!(receive(&server).await.0, expected);
+                    }
+                    let (payload, peer) = receive(&server).await;
+                    assert_eq!(payload, b"fourth");
+                    // Half the attempt window: a staggered fourth probe would only
+                    // have one quarter remaining. The one-second margin tolerates CI load.
+                    sleep(Duration::from_secs(1)).await;
+                    server.send_to(b"response", peer).await.unwrap();
+                });
+                assert!(scanner(Duration::from_secs(2), 1)
+                    .udp_scan(target, &[b"first", b"second", b"third", b"fourth"])
+                    .await
+                    .unwrap());
+                responder.await.unwrap();
+            });
+        }
+
+        #[test]
+        fn udp_accepts_a_reply_to_the_first_attempt_after_the_retry_arrives() {
+            block_on(async {
+                let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let target = server.local_addr().unwrap();
+                let responder = spawn(async move {
+                    let (payload, first) = receive(&server).await;
+                    assert_eq!(payload, b"probe");
+                    // The retry packet is the synchronization point; no sleep guesses
+                    // when the first attempt has expired.
+                    let (payload, next) = receive(&server).await;
+                    assert_eq!(payload, b"probe");
+                    assert_eq!(first, next, "retries must retain the source port");
+                    server.send_to(b"late", first).await.unwrap();
+                });
+                assert!(scanner(Duration::from_secs(1), 2)
+                    .udp_scan(target, &[b"probe"])
+                    .await
+                    .unwrap());
+                responder.await.unwrap();
+            });
+        }
+
+        #[test]
+        fn udp_silent_ports_have_a_fixed_time_and_packet_budget() {
+            block_on(async {
+                let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let target = server.local_addr().unwrap();
+                let payloads: &[&[u8]] = &[b"a", b"b", b"c", b"d", b"e", b"f", b"g", b"h"];
+                // Normal completion is ~500 ms. A timeout per payload would take four
+                // seconds; the outer test bound allows substantial scheduling slack.
+                let found = timeout(
+                    Duration::from_secs(2),
+                    scanner(Duration::from_millis(250), 2).udp_scan(target, payloads),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(!found);
+                server.set_nonblocking(true).unwrap();
+                let mut packets = Vec::new();
+                let mut buf = [0; 16];
+                loop {
+                    match server.recv_from(&mut buf) {
+                        Ok((size, peer)) => packets.push((buf[..size].to_vec(), peer)),
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(e) => panic!("receive failed: {}", e),
+                    }
+                }
+                assert_eq!(packets.len(), payloads.len() * 2);
+                for (index, (payload, peer)) in packets.iter().enumerate() {
+                    assert_eq!(payload, payloads[index % payloads.len()]);
+                    assert_eq!(*peer, packets[0].1);
+                }
+            });
+        }
+
+        #[test]
+        fn udp_empty_probe_fallback_and_explicit_empty_payload_detect_a_listener() {
+            block_on(async {
+                for payloads in [&[][..], &[&[][..]][..]] {
+                    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    let target = server.local_addr().unwrap();
+                    let responder = spawn(async move {
+                        let (payload, peer) = receive(&server).await;
+                        assert!(payload.is_empty());
+                        server.send_to(b"response", peer).await.unwrap();
+                    });
+                    assert!(scanner(Duration::from_secs(2), 1)
+                        .udp_scan(target, payloads)
+                        .await
+                        .unwrap());
+                    responder.await.unwrap();
+                }
+            });
+        }
     }
 }
