@@ -77,16 +77,17 @@ impl<'de> serde::Deserialize<'de> for PortRanges {
 }
 
 #[cfg(not(tarpaulin_include))]
-/// Parse a single `start-end` token (e.g. "100-200") into `(start, end)`.
+/// Parse a single `start-end` token (e.g. "100-200") or a single port
+/// (e.g. "8080", read as `8080-8080`) into `(start, end)`.
 /// Returns `None` when the token is malformed, cannot be parsed as `u16`,
 /// or `start > end`.
 fn parse_range(input: &str) -> Option<(u16, u16)> {
     let mut parts = input.trim().splitn(2, '-').map(str::trim);
-    let a = parts.next()?;
-    let b = parts.next()?;
-
-    let start = a.parse::<u16>().ok()?;
-    let end = b.parse::<u16>().ok()?;
+    let start = parts.next()?.parse::<u16>().ok()?;
+    let end = match parts.next() {
+        Some(b) => b.parse::<u16>().ok()?,
+        None => start,
+    };
 
     if start <= end {
         Some((start, end))
@@ -95,13 +96,15 @@ fn parse_range(input: &str) -> Option<(u16, u16)> {
     }
 }
 #[cfg(not(tarpaulin_include))]
-/// Parse a comma-separated list of `start-end` ranges into `PortRanges`.
+/// Parse a comma-separated list of `start-end` ranges and single ports into `PortRanges`.
 ///
 /// Errors with a helpful message identifying the bad token.
 fn parse_ranges(input: &str) -> Result<PortRanges, String> {
     let s = input.trim();
     if s.is_empty() {
-        return Err("empty input: expected one or more comma-separated 'start-end' pairs".into());
+        return Err(
+            "empty input: expected one or more comma-separated ports or 'start-end' pairs".into(),
+        );
     }
 
     let ranges_res: Result<Vec<(u16, u16)>, String> = s
@@ -110,7 +113,7 @@ fn parse_ranges(input: &str) -> Result<PortRanges, String> {
             let t = token.trim();
             parse_range(t).ok_or_else(|| {
                 format!(
-                    "invalid range token `{}` — expected `start-end` with 0 <= start <= end <= 65535",
+                    "invalid range token `{}` — expected a port or `start-end` with 0 <= start <= end <= 65535",
                     t
                 )
             })
@@ -142,7 +145,7 @@ pub struct Opts {
     #[arg(short, long, value_delimiter = ',')]
     pub ports: Option<Vec<u16>>,
 
-    /// Ranges of ports as comma-separated start-end pairs. Example: 1-500,1000-2500,4000-7000
+    /// Comma-separated port ranges and/or single ports. Example: 1-500,1000-2500,8080
     #[arg(short, long, conflicts_with = "ports", value_parser = parse_ranges)]
     pub range: Option<PortRanges>,
 
@@ -775,8 +778,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_single_ports_mixed_with_ranges() {
+        let opts = Opts::parse_from([
+            "rustscan",
+            "-a",
+            "127.0.0.1",
+            "-r",
+            "22,80,1000-2000,8080",
+        ]);
+
+        assert_eq!(
+            opts.range,
+            Some(PortRanges(vec![(22, 22), (80, 80), (1_000, 2_000), (8_080, 8_080)]))
+        );
+    }
+
+    #[test]
     fn rejects_malformed_ranges() {
-        for range in ["", "300-200", "1-100,", "1-2-3", "a-b", "1-70000"] {
+        for range in [
+            "", "300-200", "1-100,", "1-2-3", "a-b", "1-70000", "70000", "a", "-80", "80-",
+        ] {
             assert!(
                 Opts::try_parse_from(["rustscan", "-a", "127.0.0.1", "-r", range]).is_err(),
                 "{:?} should be rejected",
