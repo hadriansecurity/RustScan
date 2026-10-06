@@ -399,8 +399,9 @@ impl Scanner {
     ///
     /// Returns `Ok(true)` on a reply, `Ok(false)` when every attempt timed out
     /// and `Err` for other I/O errors, such as an ICMP "port unreachable".
-    /// With multiple variants, network refusals are deferred until the response
-    /// windows expire: a firewall may reject only some of the payloads.
+    /// Explicit rejection ends the scan without a response timeout or retry.
+    /// A refusal surfaced by a send is retained only while finishing the
+    /// bounded probe burst, so it cannot prevent the next variant being sent.
     async fn udp_scan(&self, socket: SocketAddr, payloads: &[&[u8]]) -> io::Result<bool> {
         const EMPTY_PROBE: &[&[u8]] = &[&[]];
         let payloads = if payloads.is_empty() {
@@ -417,7 +418,7 @@ impl Scanner {
             }
         };
         let mut buf = [0u8; 1024];
-        let mut refusals = UdpRefusals::new(payloads.len() > 1);
+        let mut refusals = UdpSendRefusals::new(payloads.len() > 1);
 
         udp_socket.connect(socket)?;
         let first_deadline = Instant::now() + self.timeout;
@@ -444,16 +445,9 @@ impl Scanner {
             }
             unsent = rest;
         }
+        refusals.finish()?;
         let early = if unsent.is_empty() {
-            match udp_socket.recv(&mut buf) {
-                Err(e) if UdpRefusals::is_refusal(&e) && refusals.multiple => {
-                    refusals.record(e)?;
-                    // There may also be a valid reply queued behind the error.
-                    // Continue asynchronously to keep this fast path bounded.
-                    Err(io::ErrorKind::WouldBlock.into())
-                }
-                result => result,
-            }
+            udp_socket.recv(&mut buf)
         } else {
             Err(io::ErrorKind::WouldBlock.into())
         };
@@ -478,27 +472,19 @@ impl Scanner {
                                 }
                             }
                         }
-                        loop {
-                            match recv_or_error(&udp_socket, &mut buf).await {
-                                Ok(size) => return Ok(size),
-                                Err(e) => {
-                                    refusals.record(e)?;
-                                    // The scanner disables Tokio's cooperative budget.
-                                    // Let the deadline fire even under an ICMP flood.
-                                    tokio::task::yield_now().await;
-                                }
-                            }
-                        }
+                        refusals.finish()?;
+                        recv_or_error(&udp_socket, &mut buf).await
                     };
-                    if let Ok(result) = timeout_at(deadline, exchange).await {
+                    let result = timeout_at(deadline, exchange).await;
+                    // A timeout during sending must not retry a known rejection.
+                    refusals.finish()?;
+                    if let Ok(result) = result {
                         received = Some(result);
                         break;
                     }
                 }
-                // A rejection of one variant must not hide a response to another.
-                // Report the remembered error only after the response windows end.
                 let Some(received) = received else {
-                    return refusals.last.map_or(Ok(false), Err);
+                    return Ok(false);
                 };
                 received
             }
@@ -539,14 +525,15 @@ impl Scanner {
     }
 }
 
-/// Multi-probe ports can reject one payload and answer another. Keep those
-/// rejections until the response deadline; local/resource failures stay fatal.
-struct UdpRefusals {
+/// A connected UDP socket may surface a previous probe's ICMP error on send.
+/// Recover only long enough to finish the bounded burst, then stop on the
+/// remembered rejection. Local/resource failures remain immediately fatal.
+struct UdpSendRefusals {
     multiple: bool,
     last: Option<io::Error>,
 }
 
-impl UdpRefusals {
+impl UdpSendRefusals {
     fn new(multiple: bool) -> Self {
         Self {
             multiple,
@@ -560,6 +547,10 @@ impl UdpRefusals {
             error.kind(),
             io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
         )
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.last.take().map_or(Ok(()), Err)
     }
 
     fn record(&mut self, error: io::Error) -> io::Result<()> {
@@ -797,16 +788,17 @@ mod tests {
         use tokio::task::spawn;
 
         #[test]
-        fn only_multi_probe_network_refusals_are_deferred() {
+        fn send_recovery_still_reports_rejection_at_the_end_of_the_burst() {
             for kind in [
                 io::ErrorKind::ConnectionRefused,
                 io::ErrorKind::ConnectionReset,
             ] {
-                let mut multiple = UdpRefusals::new(true);
+                let mut multiple = UdpSendRefusals::new(true);
                 assert!(multiple.record(kind.into()).is_ok());
-                assert_eq!(multiple.last.unwrap().kind(), kind);
+                assert_eq!(multiple.finish().unwrap_err().kind(), kind);
+                assert!(multiple.finish().is_ok());
                 assert_eq!(
-                    UdpRefusals::new(false)
+                    UdpSendRefusals::new(false)
                         .record(kind.into())
                         .unwrap_err()
                         .kind(),
@@ -818,7 +810,7 @@ mod tests {
                 io::ErrorKind::OutOfMemory,
                 io::ErrorKind::AddrNotAvailable,
             ] {
-                let mut multiple = UdpRefusals::new(true);
+                let mut multiple = UdpSendRefusals::new(true);
                 assert_eq!(multiple.record(kind.into()).unwrap_err().kind(), kind);
                 assert!(multiple.last.is_none());
             }
