@@ -65,6 +65,4 @@ pub mod scripts;
 
 pub mod address;
 
-pub mod generated {
-    include!(concat!(env!("OUT_DIR"), "/udp_payloads.rs"));
-}
+pub mod generated;

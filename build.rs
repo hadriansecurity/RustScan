@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env, fmt::Write, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf, process::Command};
 
 // Integration tests include this file to exercise the build-time parser.
 #[cfg_attr(test, allow(dead_code))]
@@ -6,61 +6,72 @@ fn main() {
     println!("cargo:rerun-if-changed=nmap-payloads");
     let data = fs::read_to_string("nmap-payloads").expect("read nmap-payloads");
     let entries = parse(&data).expect("invalid nmap-payloads");
-
-    let mut payloads = Vec::new();
-    let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+    let mut map: BTreeMap<Vec<u16>, Vec<Vec<u8>>> = BTreeMap::new();
     for entry in entries {
-        let index = match payloads
-            .iter()
-            .position(|payload| *payload == entry.payload)
-        {
-            Some(index) => index,
-            None => {
-                payloads.push(entry.payload);
-                payloads.len() - 1
-            }
-        };
-        for port in entry.ports {
-            let variants = ports.entry(port).or_default();
-            if !variants.contains(&index) {
-                variants.push(index);
-            }
+        // Multiple records can use the same port list. Keep every variant.
+        let variants = map.entry(entry.ports).or_default();
+        if !variants.contains(&entry.payload) {
+            variants.push(entry.payload);
         }
     }
+    generate_code(map);
+}
 
-    // Merge only adjacent ports with identical variant lists. Overlapping input
-    // ranges must retain their combined probes rather than shadowing each other.
-    let mut ranges: Vec<(u16, u16, Vec<usize>)> = Vec::new();
-    for (port, variants) in ports {
-        if let Some((_, end, previous)) = ranges.last_mut() {
-            if end.checked_add(1) == Some(port) && *previous == variants {
-                *end = port;
-                continue;
-            }
-        }
-        ranges.push((port, port, variants));
+/// Generates a file called Generated.rs and calls cargo fmt from the command line
+///
+/// # Arguments
+///
+/// * `port_payload_map` - A BTreeMap mapping port numbers to payload data
+#[cfg_attr(test, allow(dead_code))]
+fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
+    let dest_path = PathBuf::from("src/generated.rs");
+
+    let mut generated_code = String::new();
+    generated_code.push_str("use std::collections::BTreeMap;\n");
+    generated_code.push_str("use once_cell::sync::Lazy;\n\n");
+
+    generated_code.push_str("fn generated_data() -> BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
+    generated_code.push_str("    let mut map = BTreeMap::new();\n");
+
+    for (ports, payloads) in port_payload_map {
+        generated_code.push_str("    map.insert(vec![");
+        generated_code.push_str(
+            &ports
+                .iter()
+                .map(|&p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        generated_code.push_str("], vec![");
+        generated_code.push_str(
+            &payloads
+                .iter()
+                .map(|payload| format!("vec!{payload:?}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        generated_code.push_str("]);\n");
     }
 
-    let mut code = String::new();
-    for (index, payload) in payloads.iter().enumerate() {
-        writeln!(code, "static PAYLOAD_{index}: &[u8] = &{payload:?};").unwrap();
-    }
-    code.push_str("pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {\nmatch port {\n");
-    for (start, end, variants) in ranges {
-        let variants = variants
-            .iter()
-            .map(|index| format!("PAYLOAD_{index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        writeln!(
-            code,
-            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{variants}]; PROBES }},"
-        )
-        .unwrap();
-    }
-    code.push_str("_ => &[],\n}\n}\n");
-    let dest = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("udp_payloads.rs");
-    fs::write(dest, code).expect("write generated UDP table");
+    generated_code.push_str("    map\n");
+    generated_code.push_str("}\n\n");
+
+    generated_code.push_str(
+        "static PARSED_DATA: Lazy<BTreeMap<Vec<u16>, Vec<Vec<u8>>>> = Lazy::new(generated_data);\n",
+    );
+    generated_code
+        .push_str("pub fn get_parsed_data() -> &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
+    generated_code.push_str("    &PARSED_DATA\n");
+    generated_code.push_str("}\n");
+
+    fs::write(dest_path, generated_code).unwrap();
+
+    // format the generated code
+    Command::new("cargo")
+        .arg("fmt")
+        .arg("--all")
+        .output()
+        .expect("Failed to execute cargo fmt");
 }
 
 #[derive(Debug, PartialEq, Eq)]

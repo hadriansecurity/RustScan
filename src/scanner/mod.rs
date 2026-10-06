@@ -1,5 +1,5 @@
 //! Core functionality for actual scanning behaviour.
-use crate::generated::payloads_for;
+use crate::generated::get_parsed_data;
 use crate::port_strategy::PortStrategy;
 use crate::tui::println_safe;
 use log::debug;
@@ -12,12 +12,15 @@ use errors::{diagnostic_error, is_descriptor_exhaustion, ScanErrors};
 
 use colored::Colorize;
 use futures::stream::{FuturesUnordered, StreamExt};
+use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::task::Poll;
 use std::{
+    collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr},
     num::NonZeroU8,
+    sync::Arc,
     time::Duration,
 };
 use tokio::io::Interest;
@@ -53,6 +56,33 @@ fn filter_excluded_ports(mut ports: Vec<u16>, excluded: &[u16]) -> Vec<u16> {
     }
     ports.retain(|&port| excluded_bits[usize::from(port) / 64] & (1 << (port % 64)) == 0);
     ports
+}
+
+/// UDP payload lookup: port -> all distinct payload variants.
+///
+/// `get_parsed_data()` returns a `&'static BTreeMap<...>`, so we can store
+/// references to the payload bytes without cloning them.
+#[doc(hidden)]
+pub type UdpPayloadLookup = HashMap<u16, Vec<&'static [u8]>>;
+
+#[doc(hidden)]
+pub fn build_udp_payload_lookup(
+    udp_map: &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
+) -> UdpPayloadLookup {
+    let mut lookup: UdpPayloadLookup = HashMap::new();
+    for (ports, payloads) in udp_map {
+        for &port in ports {
+            let variants = lookup.entry(port).or_default();
+            for payload in payloads {
+                // Overlapping port lists may carry the same payload.
+                let payload = payload.as_slice();
+                if !variants.contains(&payload) {
+                    variants.push(payload);
+                }
+            }
+        }
+    }
+    lookup
 }
 
 /// The class for the scanner
@@ -196,6 +226,14 @@ impl Scanner {
         let mut errors =
             ScanErrors::new(log::log_enabled!(log::Level::Debug), self.ips.len() * 1000);
 
+        // Build UDP payload lookup once (only if we are scanning UDP).
+        // Share the map across socket futures without cloning payload bytes.
+        let udp_payloads: Option<Arc<UdpPayloadLookup>> = if self.udp {
+            Some(Arc::new(build_udp_payload_lookup(get_parsed_data())))
+        } else {
+            None
+        };
+
         debug!("Start scanning sockets. \nBatch size {}\nNumber of ip-s {}\nNumber of ports {}\nTargets all together {}\nInterval between ports {:?}",
             self.batch_size,
             self.ips.len(),
@@ -205,7 +243,7 @@ impl Scanner {
 
         if self.interval.is_zero() {
             let sockets = SocketIterator::new(&self.ips, &ports);
-            self.scan_sockets(sockets, &mut found_sockets, &mut errors)
+            self.scan_sockets(sockets, &udp_payloads, &mut found_sockets, &mut errors)
                 .await;
         } else {
             // Scan one port (on every address) at a time and wait `interval`
@@ -215,7 +253,7 @@ impl Scanner {
                     sleep(self.interval).await;
                 }
                 let sockets = SocketIterator::new(&self.ips, std::slice::from_ref(port));
-                self.scan_sockets(sockets, &mut found_sockets, &mut errors)
+                self.scan_sockets(sockets, &udp_payloads, &mut found_sockets, &mut errors)
                     .await;
             }
         }
@@ -239,6 +277,7 @@ impl Scanner {
     async fn scan_sockets(
         &self,
         mut sockets: SocketIterator<'_>,
+        udp_payloads: &Option<Arc<UdpPayloadLookup>>,
         found_sockets: &mut Vec<PortStatus>,
         errors: &mut ScanErrors,
     ) {
@@ -250,7 +289,7 @@ impl Scanner {
                 let mut started = false;
                 if ftrs.len() < self.batch_size {
                     if let Some(socket) = sockets.next() {
-                        ftrs.push(self.scan_socket(socket));
+                        ftrs.push(self.scan_socket(socket, udp_payloads.clone()));
                         started = true;
                         work += 1;
                     }
@@ -310,9 +349,13 @@ impl Scanner {
     /// ```
     ///
     /// Note: `self` must contain `self.ip`.
-    async fn scan_socket(&self, socket: SocketAddr) -> io::Result<PortStatus> {
+    async fn scan_socket(
+        &self,
+        socket: SocketAddr,
+        udp_payloads: Option<Arc<UdpPayloadLookup>>,
+    ) -> io::Result<PortStatus> {
         if self.udp {
-            return self.scan_udp_socket(socket).await;
+            return self.scan_udp_socket(socket, udp_payloads).await;
         }
 
         let tries = self.tries.get();
@@ -351,8 +394,17 @@ impl Scanner {
         unreachable!();
     }
 
-    async fn scan_udp_socket(&self, socket: SocketAddr) -> io::Result<PortStatus> {
-        if self.udp_scan(socket, payloads_for(socket.port())).await? {
+    async fn scan_udp_socket(
+        &self,
+        socket: SocketAddr,
+        udp_payloads: Option<Arc<UdpPayloadLookup>>,
+    ) -> io::Result<PortStatus> {
+        let payloads = udp_payloads
+            .as_ref()
+            .and_then(|lookup| lookup.get(&socket.port()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if self.udp_scan(socket, payloads).await? {
             return Ok(PortStatus::Open(socket));
         }
         Err(io::Error::other(format!(
@@ -777,7 +829,8 @@ mod tests {
             0x12, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x07, 0x30, 0x05,
             0x06, 0x01, 0x00, 0x05, 0x00,
         ];
-        assert!(payloads_for(161).contains(&expected));
+        let lookup = build_udp_payload_lookup(get_parsed_data());
+        assert!(lookup[&161].contains(&expected));
     }
 
     /// The SSDP probe mixes `\xNN` escapes, `\"` escapes and literal text
@@ -787,7 +840,8 @@ mod tests {
     fn udp_ssdp_probe_decodes_escapes_and_literal_text() {
         let expected: &[u8] =
             b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 5\r\nST: ssdp:all\r\n\r\n";
-        assert_eq!(payloads_for(1900), [expected]);
+        let lookup = build_udp_payload_lookup(get_parsed_data());
+        assert_eq!(lookup[&1900], [expected]);
     }
 
     mod udp {
