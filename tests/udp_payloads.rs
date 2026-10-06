@@ -1,10 +1,10 @@
 //! Pins the probe variants generated from `nmap-payloads`, so a parsing
 //! regression shows up as lost coverage instead of silently missed services.
 
-#[path = "../build/nmap_payloads.rs"]
-mod nmap_payloads;
+#[path = "../build.rs"]
+mod build_script;
 
-use nmap_payloads::parse;
+use build_script::parse;
 use rustscan::generated::payloads_for;
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
