@@ -786,24 +786,16 @@ mod tests {
         assert_eq!(error.to_string(), "future timed out");
     }
 
-    /// Regression test for https://github.com/bee-san/RustScan/issues/933:
-    /// the SNMP public-walk probe must be the exact 33-byte BER packet, with
-    /// the literal `public` community string intact. The old hexdigits-only
-    /// decoding mangled it into a 28-byte probe that agents never answered.
+    /// Preserve literal community bytes alongside escaped BER fields in Nmap's
+    /// current SNMPv1 GetRequest. Regression coverage for the old decoder that
+    /// discarded non-hex text (https://github.com/bee-san/RustScan/issues/933).
     #[test]
     fn udp_snmp_probe_bytes_match_nmap() {
-        let variants = payloads_for(161);
-        let expected: Vec<u8> = vec![
-            0x30, 0x1f, 0x02, 0x01, 0x00, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa1,
-            0x12, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x07, 0x30, 0x05,
-            0x06, 0x01, 0x00, 0x05, 0x00,
-        ];
-        assert!(variants.contains(&expected.as_slice()), "{:?}", variants);
+        let expected: &[u8] = b"0\x82\0/\x02\x01\0\x04\x06public\xa0\x82\0\x20\x02\x04\x4c\x33\xa7\x56\x02\x01\0\x02\x01\0\x30\x82\0\x10\x30\x82\0\x0c\x06\x08\x2b\x06\x01\x02\x01\x01\x05\0\x05\0";
+        assert!(payloads_for(161).contains(&expected));
     }
 
-    /// The SSDP probe mixes `\xNN` escapes, `\"` escapes and literal text
-    /// across two quoted segments: segments must decode and concatenate
-    /// with no separators.
+    /// The service probe mixes escaped bytes and literal SSDP headers.
     #[test]
     fn udp_ssdp_probe_decodes_escapes_and_literal_text() {
         let payload = payloads_for(1900)
