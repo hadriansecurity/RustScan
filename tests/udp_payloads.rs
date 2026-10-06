@@ -5,15 +5,7 @@
 mod build_script;
 
 use build_script::parse;
-use once_cell::sync::Lazy;
-use rustscan::generated::get_parsed_data;
-use rustscan::scanner::{build_udp_payload_lookup, UdpPayloadLookup};
-
-static LOOKUP: Lazy<UdpPayloadLookup> = Lazy::new(|| build_udp_payload_lookup(get_parsed_data()));
-
-fn payloads_for(port: u16) -> &'static [&'static [u8]] {
-    LOOKUP.get(&port).map(Vec::as_slice).unwrap_or(&[])
-}
+use rustscan::generated::payloads_for;
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
@@ -79,7 +71,7 @@ fn invalid_entries_fail_with_the_source_line_instead_of_losing_coverage() {
 }
 
 #[test]
-fn runtime_lookup_matches_every_vendored_entry_and_gap() {
+fn generated_lookup_matches_every_vendored_entry_and_gap() {
     use std::collections::BTreeMap;
     let entries = parse(include_str!("../nmap-payloads")).unwrap();
     let mut expected: BTreeMap<u16, Vec<Vec<u8>>> = BTreeMap::new();
@@ -92,16 +84,13 @@ fn runtime_lookup_matches_every_vendored_entry_and_gap() {
         }
     }
     for port in 0..=u16::MAX {
-        let mut variants: Vec<&[u8]> = expected
+        let variants: Vec<&[u8]> = expected
             .get(&port)
             .into_iter()
             .flatten()
             .map(Vec::as_slice)
             .collect();
-        let mut actual = payloads_for(port).to_vec();
-        actual.sort_unstable();
-        variants.sort_unstable();
-        assert_eq!(actual, variants, "udp/{port}");
+        assert_eq!(payloads_for(port), variants, "udp/{port}");
     }
 }
 
@@ -144,7 +133,7 @@ fn overlapping_dns_and_shared_snmp_keys_preserve_variants() {
 }
 
 #[test]
-fn runtime_variants_are_unique_and_shared_across_ports() {
+fn generated_variants_are_unique_and_shared_across_ports() {
     for port in 0..=u16::MAX {
         let payloads = payloads_for(port);
         for (index, payload) in payloads.iter().enumerate() {

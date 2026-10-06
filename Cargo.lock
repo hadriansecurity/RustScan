@@ -1436,7 +1436,6 @@ dependencies = [
  "itertools 0.15.0",
  "libc",
  "log",
- "once_cell",
  "parameterized",
  "rand 0.10.3",
  "rlimit",
