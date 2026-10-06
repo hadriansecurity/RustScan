@@ -128,6 +128,8 @@ We have 2 usage guides. [Basic Usage][usage-1] and [Things you may want to do][u
 
 We also have documentation about our config file [here][config-file-here].
 
+For UDP scans, see [payload sources, packet budgets, and coverage validation](docs/udp-payloads.md).
+
 # 🎪 Community
 
 [Contributing][community-1] Read this to learn how.
