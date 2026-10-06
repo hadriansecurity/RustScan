@@ -1,0 +1,2 @@
+# Independent QUIC server for tests/udp_quic.py, not a RustScan runtime dependency.
+aioquic==1.3.0

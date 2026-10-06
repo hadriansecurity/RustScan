@@ -4,6 +4,8 @@
 #[allow(dead_code)]
 #[path = "../build/nmap_payloads.rs"]
 mod build_script;
+#[path = "../build/supplemental_payloads.rs"]
+mod supplemental_payloads;
 
 use rustscan::generated::payloads_for;
 
@@ -76,7 +78,7 @@ fn no_payload_service_probe_is_not_added_to_discovery() {
 }
 
 #[test]
-fn every_port_matches_nmaps_selection() {
+fn every_port_matches_nmap_and_explicit_supplements() {
     use std::collections::{BTreeMap, BTreeSet};
     type Probes = BTreeMap<u16, BTreeSet<Vec<u8>>>;
     fn expand(entries: Vec<build_script::Entry>) -> Probes {
@@ -123,7 +125,16 @@ fn every_port_matches_nmaps_selection() {
             reference,
             "Nmap selection udp/{port}"
         );
-        let expected: BTreeSet<_> = reference.iter().map(Vec::as_slice).collect();
+        let expected: BTreeSet<_> = reference
+            .iter()
+            .map(Vec::as_slice)
+            .chain(
+                supplemental_payloads::PROBES
+                    .iter()
+                    .filter(|(destination, _)| *destination == port)
+                    .map(|(_, payload)| *payload),
+            )
+            .collect();
         let generated: BTreeSet<_> = payloads_for(port).iter().copied().collect();
         assert_eq!(generated, expected, "generated selection udp/{port}");
     }
@@ -136,8 +147,16 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[test]
 fn generated_lookup_matches_every_vendored_entry_and_gap() {
     use std::collections::BTreeMap;
-    let entries =
+    let mut entries =
         build_script::parse_service_probes(include_str!("../nmap-service-probes")).unwrap();
+    entries.extend(
+        supplemental_payloads::PROBES
+            .iter()
+            .map(|&(port, payload)| build_script::Entry {
+                ports: vec![port],
+                payload: payload.to_vec(),
+            }),
+    );
     let mut expected: BTreeMap<u16, Vec<Vec<u8>>> = BTreeMap::new();
     for entry in entries {
         for port in entry.ports {
@@ -225,7 +244,7 @@ fn vendored_database_coverage_and_packet_budget_are_preserved() {
     );
     assert_eq!(
         actual,
-        (33_110, 33_204, 86, Some(4)),
+        (33_114, 33_211, 87, Some(4)),
         "probe coverage changed: investigate lost probes or update after syncing the Nmap databases"
     );
 }
@@ -235,7 +254,19 @@ fn full_range_datagram_budget_includes_empty_fallbacks() {
     let per_attempt: usize = (1..=u16::MAX)
         .map(|port| payloads_for(port).len().max(1))
         .sum();
-    assert_eq!(per_attempt, 65_629);
-    assert_eq!(per_attempt * 2, 131_258);
+    assert_eq!(per_attempt, 65_632);
+    assert_eq!(per_attempt * 2, 131_264);
     assert!(payloads_for(0).is_empty());
+}
+
+#[test]
+fn quic_probe_uses_a_reserved_version_and_minimum_initial_datagram_size() {
+    let probe = payloads_for(443).last().unwrap();
+    assert_eq!(probe.len(), 1200);
+    assert_eq!(probe[0] & 0xc0, 0xc0);
+    assert_eq!(&probe[1..5], &[0x0a; 4]);
+    assert_eq!(probe[5], 8);
+    assert_eq!(probe[14], 8);
+    assert_ne!(&probe[6..14], &probe[15..23]);
+    assert!(probe[23..].iter().all(|&byte| byte == 0));
 }
