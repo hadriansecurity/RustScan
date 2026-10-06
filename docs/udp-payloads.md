@@ -1,12 +1,12 @@
 # UDP discovery payloads
 
-RustScan merges the existing `nmap-payloads` with the vendored
-`nmap-service-probes` at build time. It keeps legacy variants first, appends
-eligible service probes in file order, and removes byte-identical duplicates
-per port. Payload bytes are shared in the compiled table; no Nmap installation
-or database download is required at build or scan time.
+RustScan generates its UDP discovery table solely from the pinned
+`nmap-service-probes` at build time. It preserves eligible probe order and
+removes byte-identical duplicates per port. Payload bytes are shared in the
+compiled table; no Nmap installation or database download is required at build
+or scan time.
 
-## Pinned source
+## Pinned source and selection
 
 - Nmap version: **7.991SVN** (`nmap.h` at the revision below).
 - Commit: **24229f2e65aa11ca860b5c4ec6b4757dc2d8afd0**.
@@ -21,12 +21,19 @@ lists supply destinations. Ranges include both endpoints. `sslports`, `Exclude`,
 rarity, and service match rules do not affect discovery-payload selection.
 Probe strings use Nmap's delimiters and strict `cstring_unescape` rules.
 TCP probes and UDP probes without destination ports contribute nothing.
+The `no-payload` prefix check deliberately matches Nmap's ten-byte `strncmp`.
 
 This pin has 83 eligible definitions, covering 33,110 ports and 33,204 distinct
-(port, payload) pairs. The merged RustScan table covers 33,111 ports and 33,251
-pairs; 124 ports have multiple variants. The extra pairs preserve legacy probes.
-This is payload-selection parity, not parity with Nmap's timing or `-sV` service
+(port, payload) pairs; 86 ports have multiple variants. This is payload-selection
+parity with the pinned Nmap, not parity with its timing or `-sV` service
 identification.
+
+The old `nmap-payloads` snapshot and its parser have been removed. Its 47
+legacy-only pairs were mostly older or different requests on ports already
+covered by Nmap, rather than demonstrated additional coverage. UDP/4500 is the
+only destination that loses a specific probe and now receives an empty datagram,
+as it does with this Nmap pin. No local exception is retained. SQL Browser's
+`no-payload` exclusion is also preserved.
 
 ## Packet budget
 
@@ -37,19 +44,21 @@ can end the scan early.
 
 For ports **1–65535**, per target IP:
 
-| Measure | Legacy-only prerequisite | Merged table |
+| Measure | Legacy-only prerequisite | Current Nmap table |
 | --- | ---: | ---: |
-| Ports with a specific probe | 33,053 | 33,111 |
-| Distinct (port, payload) pairs | 33,077 | 33,251 |
-| Maximum variants on one port | 4 | 5 |
-| Maximum datagrams, `--tries 1` (default) | 65,559 | **65,675** |
-| Maximum datagrams, `--tries 2` | 131,118 | **131,350** |
+| Ports with a specific probe | 33,053 | 33,110 |
+| Distinct (port, payload) pairs | 33,077 | 33,204 |
+| Maximum variants on one port | 4 | 4 |
+| Maximum datagrams, `--tries 1` (default) | 65,559 | **65,629** |
+| Maximum datagrams, `--tries 2` | 131,118 | **131,258** |
 
-The merged bound is `65,535 - 33,111 + 33,251 = 65,675` datagrams per attempt,
-an increase of 116 (about 0.18%). For `--tries N`, multiply by `max(N, 1)`;
-the CLI treats zero tries as one. These are transmitted UDP datagrams, excluding
-IP/UDP headers, ICMP responses, and any separate Nmap follow-up. Port 0 is
-excluded from the ordinary full range; explicitly including it adds one empty
+The bound is `65,535 - 33,110 + 33,204 = 65,629` datagrams per attempt,
+70 more than the legacy-only prerequisite. Removing the initially retained
+legacy variants reduces the former merged bound of 65,675 by 46: removing the
+4500 probe substitutes an empty datagram rather than removing a datagram.
+For `--tries N`, multiply by `max(N, 1)`; the CLI treats zero tries as one.
+These are transmitted UDP datagrams, excluding IP/UDP headers, ICMP responses,
+and any separate Nmap follow-up. Explicitly including port 0 adds one empty
 datagram per attempt. These bounds are asserted in `tests/udp_payloads.rs`.
 
 ## Independent Nmap reference
@@ -57,9 +66,9 @@ datagram per attempt. These bounds are asserted in `tests/udp_payloads.rs`.
 `fixtures/nmap-udp-selection.tsv` records the actual pinned Nmap payload
 API's output, compressed by grouping identical payload bytes across port ranges.
 Its SHA-256 is `71545be7f0133d2ba9e1335adf203775b3e4cd1eb9dacb58122d954ee16c16b6`.
-The test compares our service-probe parser against that reference for **every
-port 0–65535**, then compares the generated lookup against the union of the
-reference and the legacy probes. Separate tests enforce uniqueness and ordering.
+The test compares both our parser and the generated lookup directly against
+that reference for **every port 0–65535**. Separate tests enforce uniqueness
+and source ordering.
 
 To regenerate, extract the [pinned Nmap source archive](https://github.com/nmap/nmap/archive/24229f2e65aa11ca860b5c4ec6b4757dc2d8afd0.tar.gz), then run:
 
@@ -76,38 +85,35 @@ committed fixture and need neither Nmap nor that toolchain. When updating the
 pin, review the source rules, regenerate the reference and hashes, and update
 the version, coverage counts, and packet-budget assertions together.
 
-## Acceptance results (2026-10-06)
+## Network validation
 
-The local port-scanner testbed ran in a Docker container with `--network none`.
-A full-range loopback scan used:
+The committed `tests/udp_service_probes.py` checks exact probe bytes and
+discovery on **523 (DB2 DAS), 3483 (SqueezeCenter), and 5060 (SIP OPTIONS)** over
+IPv4 and IPv6, with silent, closed, and alternate-source-port controls (24
+scenarios). The six ignored Rust UDP socket tests in
+`src/scanner/udp_socket_tests.rs` cover replies, retries, silent-port budgets,
+empty probes, closed ports, and the response window for the last variant.
+The Python ICMP rejection harness remains removed, as on the prerequisite branch.
 
-```sh
-rustscan --no-config --addresses 127.0.0.1 --range 1-65535 \
-  --udp --greppable --timeout 500 --tries 1 --batch-size 256
-```
-
-All **115 expected open ports** were found, including **523 (DB2 DAS),
-3483 (SqueezeCenter), and 5060 (SIP OPTIONS)**. No ports among the **100 silent,
-1,000 filtered, or 64,320 closed controls** were reported open: **zero false
-positives and zero false negatives** in this controlled testbed.
-The testbed configuration SHA-256 was
-`268e3f4eb76546631afc1189f79b4aaf94c081fa784dddc96ccf9544f97e28e0`.
-
-The committed `tests/udp_service_probes.py` additionally checks exact probe
-bytes and discovery on those three ports over IPv4 and IPv6, with silent,
-closed, and alternate-source-port controls (24 scenarios). The eight existing
-ICMP rejection/packet-budget regressions also pass with the new DNS variants.
-These controlled results do not establish detection rates on arbitrary services.
-
-Run the network regressions on Linux (requires Python, iproute2, iptables, and
-permission to create a network namespace):
+Run these on Linux (requires Python, iproute2, and permission to
+create a network namespace):
 
 ```sh
 cargo build --locked
-sudo unshare --net python3 tests/udp_rejection.py target/debug/rustscan
+cargo test --locked --lib udp_socket_tests -- --ignored
 sudo unshare --net python3 tests/udp_service_probes.py target/debug/rustscan
 ```
 
-Both scripts run in Linux CI. Rust validation also passed: 99 unit/integration
-tests, seven doctests (one existing ignored), Clippy across all targets with
-warnings denied, formatting, and the documentation build.
+The service-probe script runs in Linux CI for PRs targeting master. The Rust
+UDP socket tests run in the manually dispatched UDP regression workflow.
+These controlled results and payload parity do
+not establish detection rates on arbitrary services. The earlier 115-port
+full-range testbed result applied to the table that still retained legacy
+variants; it is not evidence that removing those variants preserves every
+legacy service response.
+
+On 2026-10-07, the build rebased onto the compile-time lookup in PR #11 passed
+all 24 service-probe scenarios and all six Rust UDP socket tests in an isolated
+Linux container. Rust validation passed: 95 unit/integration tests, seven
+doctests (one ignored), Clippy across all targets with warnings denied,
+formatting, and the documentation build.

@@ -1,11 +1,10 @@
-//! Pins the probe variants generated from both Nmap databases, so a parsing
+//! Pins the probe variants generated from the pinned Nmap database, so a parsing
 //! regression shows up as lost coverage instead of silently missed services.
 
 #[allow(dead_code)]
 #[path = "../build/nmap_payloads.rs"]
 mod build_script;
 
-use build_script::parse;
 use rustscan::generated::payloads_for;
 
 #[test]
@@ -17,6 +16,8 @@ rarity 9
 ports 523,3483,5060-5061,65535
 sslports 12345
 Probe UDP Skip q|skip| no-payload
+ports 523
+Probe UDP SkipSuffix q|skip too| no-payloadX
 ports 523
 Probe TCP Reset q|tcp|
 ports 523
@@ -66,14 +67,16 @@ fn malformed_service_probes_fail_with_source_lines() {
 }
 
 #[test]
-fn no_payload_service_probe_is_not_added_to_legacy_variants() {
+fn no_payload_service_probe_is_not_added_to_discovery() {
     // Sqlping is version-detection-only; there is no discovery probe on 1434.
     assert!(!payloads_for(1434).contains(&b"\x02".as_slice()));
     assert!(payloads_for(1434).is_empty());
+    // This legacy-only destination now uses the same empty fallback as Nmap.
+    assert!(payloads_for(4500).is_empty());
 }
 
 #[test]
-fn every_port_matches_nmaps_selection_plus_preserved_legacy_probes() {
+fn every_port_matches_nmaps_selection() {
     use std::collections::{BTreeMap, BTreeSet};
     type Probes = BTreeMap<u16, BTreeSet<Vec<u8>>>;
     fn expand(entries: Vec<build_script::Entry>) -> Probes {
@@ -112,7 +115,6 @@ fn every_port_matches_nmaps_selection_plus_preserved_legacy_probes() {
     assert_eq!(nmap.values().map(BTreeSet::len).sum::<usize>(), 33_204);
     let services =
         expand(build_script::parse_service_probes(include_str!("../nmap-service-probes")).unwrap());
-    let legacy = expand(parse(include_str!("../nmap-payloads")).unwrap());
     let empty = BTreeSet::new();
     for port in 0..=u16::MAX {
         let reference = nmap.get(&port).unwrap_or(&empty);
@@ -121,12 +123,9 @@ fn every_port_matches_nmaps_selection_plus_preserved_legacy_probes() {
             reference,
             "Nmap selection udp/{port}"
         );
-        let expected: BTreeSet<_> = reference
-            .union(legacy.get(&port).unwrap_or(&empty))
-            .map(Vec::as_slice)
-            .collect();
+        let expected: BTreeSet<_> = reference.iter().map(Vec::as_slice).collect();
         let generated: BTreeSet<_> = payloads_for(port).iter().copied().collect();
-        assert_eq!(generated, expected, "merged selection udp/{port}");
+        assert_eq!(generated, expected, "generated selection udp/{port}");
     }
 }
 
@@ -135,71 +134,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[test]
-fn comments_do_not_remove_payloads_or_literal_hashes() {
-    let entries = parse(
-        r##"
-# comment with "unbalanced quotes
-udp 623 # header comment
-"a#b" # trailing comment
-"\"#\\" # escaped quote and backslash before the closing quote
-"\x80\0"
-"##,
-    )
-    .unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].payload, b"a#b\"#\\\x80\0");
-}
-
-#[test]
-fn ranges_include_both_endpoints_and_deduplicate_ports() {
-    let entries = parse("udp 1198-1199,1199,65534-65535,8-8 \"probe\"").unwrap();
-    assert_eq!(entries[0].ports, [8, 1198, 1199, 65534, 65535]);
-}
-
-#[test]
-fn duplicate_and_overlapping_port_lists_preserve_every_entry() {
-    let entries =
-        parse("udp 53,123 \"first\"\nudp 53,123 \"second\"\nudp 123-124 \"third\"").unwrap();
-    assert_eq!(entries.len(), 3);
-    assert_eq!(entries[0].payload, b"first");
-    assert_eq!(entries[1].payload, b"second");
-    assert_eq!(entries[2].ports, [123, 124]);
-    assert_eq!(entries[2].payload, b"third");
-}
-
-#[test]
-fn flushes_single_and_final_entries_without_a_trailing_newline() {
-    for input in ["udp 48899 \"ads\"", "udp 53 \"dns\"\nudp 48899 \"ads\""] {
-        let entries = parse(input).unwrap();
-        assert_eq!(entries.last().unwrap().ports, [48899]);
-        assert_eq!(entries.last().unwrap().payload, b"ads");
-    }
-}
-
-#[test]
-fn accepts_indented_headers_tabs_and_multiline_entries() {
-    let entries = parse("  udp\t53\n\"a\"\n\"b\"\n\tudp\n123\n\"c\"").unwrap();
-    assert_eq!(entries[0].ports, [53]);
-    assert_eq!(entries[0].payload, b"ab");
-    assert_eq!(entries[1].ports, [123]);
-    assert_eq!(entries[1].payload, b"c");
-}
-
-#[test]
-fn invalid_entries_fail_with_the_source_line_instead_of_losing_coverage() {
-    for entry in ["udp 2-1 \"x\"", "udp 65536 \"x\"", "udp 53", "tcp 53 \"x\""] {
-        let error = parse(&format!("# comment\n{entry}")).unwrap_err();
-        assert!(error.starts_with("line 2:"), "{}", error);
-    }
-}
-
-#[test]
 fn generated_lookup_matches_every_vendored_entry_and_gap() {
     use std::collections::BTreeMap;
-    let mut entries = parse(include_str!("../nmap-payloads")).unwrap();
-    entries.extend(
-        build_script::parse_service_probes(include_str!("../nmap-service-probes")).unwrap(),
-    );
+    let entries =
+        build_script::parse_service_probes(include_str!("../nmap-service-probes")).unwrap();
     let mut expected: BTreeMap<u16, Vec<Vec<u8>>> = BTreeMap::new();
     for entry in entries {
         for port in entry.ports {
@@ -252,10 +190,10 @@ fn overlapping_dns_and_shared_snmp_keys_preserve_variants() {
     let dns = payloads_for(53);
     assert!(dns.contains(&b"\0\0\x10\0\0\0\0\0\0\0\0\0".as_slice()));
     assert!(dns.iter().any(|p| contains(p, b"version")));
-    assert_eq!(dns.len(), 4);
+    assert_eq!(dns.len(), 3);
     let snmp = payloads_for(161);
     assert!(snmp.iter().any(|p| p.starts_with(b"\x30\x3a\x02\x01\x03")));
-    assert_eq!(snmp.len(), 3);
+    assert_eq!(snmp.len(), 2);
 }
 
 #[test]
@@ -287,7 +225,7 @@ fn vendored_database_coverage_and_packet_budget_are_preserved() {
     );
     assert_eq!(
         actual,
-        (33_111, 33_251, 124, Some(5)),
+        (33_110, 33_204, 86, Some(4)),
         "probe coverage changed: investigate lost probes or update after syncing the Nmap databases"
     );
 }
@@ -297,7 +235,7 @@ fn full_range_datagram_budget_includes_empty_fallbacks() {
     let per_attempt: usize = (1..=u16::MAX)
         .map(|port| payloads_for(port).len().max(1))
         .sum();
-    assert_eq!(per_attempt, 65_675);
-    assert_eq!(per_attempt * 2, 131_350);
+    assert_eq!(per_attempt, 65_629);
+    assert_eq!(per_attempt * 2, 131_258);
     assert!(payloads_for(0).is_empty());
 }
