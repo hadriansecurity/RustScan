@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::io::Interest;
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::time::{sleep, timeout};
+use tokio::time::{sleep, timeout, timeout_at, Instant};
 
 /// How many sockets the scan starts or finishes (counted together) between
 /// two polls of the runtime's I/O driver; see `Scanner::scan_sockets`.
@@ -399,6 +399,8 @@ impl Scanner {
     ///
     /// Returns `Ok(true)` on a reply, `Ok(false)` when every attempt timed out
     /// and `Err` for other I/O errors, such as an ICMP "port unreachable".
+    /// With multiple variants, network refusals are deferred until the response
+    /// windows expire: a firewall may reject only some of the payloads.
     async fn udp_scan(&self, socket: SocketAddr, payloads: &[&[u8]]) -> io::Result<bool> {
         const EMPTY_PROBE: &[&[u8]] = &[&[]];
         let payloads = if payloads.is_empty() {
@@ -415,8 +417,10 @@ impl Scanner {
             }
         };
         let mut buf = [0u8; 1024];
+        let mut refusals = UdpRefusals::new(payloads.len() > 1);
 
         udp_socket.connect(socket)?;
+        let first_deadline = Instant::now() + self.timeout;
 
         // Send the probes and try the first receive straight away, as
         // async-std did. Tokio's readiness-based I/O would first wait for the
@@ -427,15 +431,29 @@ impl Scanner {
         // there when the sends return. The socket is only registered with
         // Tokio when we really have to wait.
         let mut unsent = payloads;
-        while let Some((payload, rest)) = unsent.split_first() {
-            match udp_socket.send(payload) {
-                Ok(_) => unsent = rest,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e),
+        'send: while let Some((payload, rest)) = unsent.split_first() {
+            // A queued ICMP rejection can fail this send before its payload
+            // leaves the socket. Retry that same payload, but bound recovery
+            // even if the peer keeps generating errors.
+            for _ in 0..=payloads.len() {
+                match udp_socket.send(payload) {
+                    Ok(_) => break,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break 'send,
+                    Err(e) => refusals.record(e)?,
+                }
             }
+            unsent = rest;
         }
         let early = if unsent.is_empty() {
-            udp_socket.recv(&mut buf)
+            match udp_socket.recv(&mut buf) {
+                Err(e) if UdpRefusals::is_refusal(&e) && refusals.multiple => {
+                    refusals.record(e)?;
+                    // There may also be a valid reply queued behind the error.
+                    // Continue asynchronously to keep this fast path bounded.
+                    Err(io::ErrorKind::WouldBlock.into())
+                }
+                result => result,
+            }
         } else {
             Err(io::ErrorKind::WouldBlock.into())
         };
@@ -446,20 +464,41 @@ impl Scanner {
                 let mut received = None;
                 for attempt in 0..self.tries.get() {
                     let probes = if attempt == 0 { unsent } else { payloads };
+                    let deadline = if attempt == 0 {
+                        first_deadline
+                    } else {
+                        Instant::now() + self.timeout
+                    };
                     let exchange = async {
                         for payload in probes {
-                            udp_socket.send(payload).await?;
+                            for _ in 0..=payloads.len() {
+                                match udp_socket.send(payload).await {
+                                    Ok(_) => break,
+                                    Err(e) => refusals.record(e)?,
+                                }
+                            }
                         }
-                        recv_or_error(&udp_socket, &mut buf).await
+                        loop {
+                            match recv_or_error(&udp_socket, &mut buf).await {
+                                Ok(size) => return Ok(size),
+                                Err(e) => {
+                                    refusals.record(e)?;
+                                    // The scanner disables Tokio's cooperative budget.
+                                    // Let the deadline fire even under an ICMP flood.
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                        }
                     };
-                    if let Ok(result) = timeout(self.timeout, exchange).await {
+                    if let Ok(result) = timeout_at(deadline, exchange).await {
                         received = Some(result);
                         break;
                     }
                 }
-                // Nothing came back in time.
+                // A rejection of one variant must not hide a response to another.
+                // Report the remembered error only after the response windows end.
                 let Some(received) = received else {
-                    return Ok(false);
+                    return refusals.last.map_or(Ok(false), Err);
                 };
                 received
             }
@@ -496,6 +535,39 @@ impl Scanner {
             } else {
                 println_safe(format_args!("Closed {}", socket.to_string().red()));
             }
+        }
+    }
+}
+
+/// Multi-probe ports can reject one payload and answer another. Keep those
+/// rejections until the response deadline; local/resource failures stay fatal.
+struct UdpRefusals {
+    multiple: bool,
+    last: Option<io::Error>,
+}
+
+impl UdpRefusals {
+    fn new(multiple: bool) -> Self {
+        Self {
+            multiple,
+            last: None,
+        }
+    }
+
+    fn is_refusal(error: &io::Error) -> bool {
+        // Winsock reports an ICMP port-unreachable as ConnectionReset.
+        matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+        )
+    }
+
+    fn record(&mut self, error: io::Error) -> io::Result<()> {
+        if self.multiple && Self::is_refusal(&error) {
+            self.last = Some(error);
+            Ok(())
+        } else {
+            Err(error)
         }
     }
 }
@@ -723,6 +795,34 @@ mod tests {
         use crate::input::ScanOrder;
         use std::future::Future;
         use tokio::task::spawn;
+
+        #[test]
+        fn only_multi_probe_network_refusals_are_deferred() {
+            for kind in [
+                io::ErrorKind::ConnectionRefused,
+                io::ErrorKind::ConnectionReset,
+            ] {
+                let mut multiple = UdpRefusals::new(true);
+                assert!(multiple.record(kind.into()).is_ok());
+                assert_eq!(multiple.last.unwrap().kind(), kind);
+                assert_eq!(
+                    UdpRefusals::new(false)
+                        .record(kind.into())
+                        .unwrap_err()
+                        .kind(),
+                    kind
+                );
+            }
+            for kind in [
+                io::ErrorKind::PermissionDenied,
+                io::ErrorKind::OutOfMemory,
+                io::ErrorKind::AddrNotAvailable,
+            ] {
+                let mut multiple = UdpRefusals::new(true);
+                assert_eq!(multiple.record(kind.into()).unwrap_err().kind(), kind);
+                assert!(multiple.last.is_none());
+            }
+        }
 
         fn block_on<F: Future>(future: F) -> F::Output {
             tokio::runtime::Builder::new_current_thread()

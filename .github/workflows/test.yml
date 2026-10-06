@@ -43,3 +43,9 @@ jobs:
 
       - name: Run tests
         run: just test
+
+      - name: UDP payload rejection regression
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked
+          sudo unshare --net python3 tests/udp_rejection.py target/debug/rustscan
