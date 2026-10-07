@@ -1,9 +1,10 @@
 # UDP discovery payloads
 
-RustScan generates its UDP discovery table solely from the pinned
+RustScan generates its UDP discovery table from the pinned
 `nmap-service-probes` at build time. It preserves eligible probe order and
 removes byte-identical duplicates per port. Payload bytes are shared in the
-compiled table; no Nmap installation or database download is required at build
+compiled table. Explicit supplements are appended after Nmap, with the same
+deduplication. No Nmap installation or database download is required at build
 or scan time.
 
 ## Pinned source and selection
@@ -24,16 +25,38 @@ TCP probes and UDP probes without destination ports contribute nothing.
 The `no-payload` prefix check deliberately matches Nmap's ten-byte `strncmp`.
 
 This pin has 83 eligible definitions, covering 33,110 ports and 33,204 distinct
-(port, payload) pairs; 86 ports have multiple variants. This is payload-selection
+(port, payload) pairs; 86 ports have multiple variants before supplements. The
+Nmap portion has payload-selection
 parity with the pinned Nmap, not parity with its timing or `-sV` service
 identification.
 
 The old `nmap-payloads` snapshot and its parser have been removed. Its 47
 legacy-only pairs were mostly older or different requests on ports already
 covered by Nmap, rather than demonstrated additional coverage. UDP/4500 is the
-only destination that loses a specific probe and now receives an empty datagram,
-as it does with this Nmap pin. No local exception is retained. SQL Browser's
+only destination that loses a specific probe in Nmap. The supplement below
+provides a correctly framed replacement for this port. SQL Browser's
 `no-payload` exclusion is also preserved.
+
+## Supplemental probes
+
+Eight additional variants cover QUIC/443, Chargen/19, three Digi ADDP/2362
+families, WS-Discovery/3702, IPsec NAT-T/4500, and Sentinel/5093. Six packets
+are pinned from ZMap; the QUIC packet uses a reserved version and 1200-byte padding to elicit
+Version Negotiation. It does not complete TLS or identify HTTP/3. The WSD
+packet requests DPWS devices, not every WS-Discovery service type. See
+[provenance and validation limits](../probes/zmap/README.md).
+
+UDP/4500 uses the pinned Nmap `IKE_MAIN_MODE` request prefixed with four zero
+bytes, the Non-ESP Marker required by [RFC 3948 section 2.2](https://www.rfc-editor.org/rfc/rfc3948.html#section-2.2).
+The 196-byte datagram contains a 192-byte IKE message; the IKE length excludes
+the marker. The old `IPSEC_START` mapping sent an unframed IKE request to both
+500 and 4500. This supplement leaves port 500 and the Nmap database unchanged.
+It probes IKEv1 Main Mode only; IKEv2-only endpoints and gateways requiring
+negotiation on port 500 first may remain silent. It does not establish a VPN.
+
+The Nmap database and eligibility rules remain unchanged. SQL Browser is still
+excluded; RDP is deferred pending Windows validation. Including supplements,
+there are 33,115 covered ports, 33,212 pairs, and 87 ports with multiple variants.
 
 ## Packet budget
 
@@ -44,18 +67,18 @@ can end the scan early.
 
 For ports **1–65535**, per target IP:
 
-| Measure | Legacy-only prerequisite | Current Nmap table |
+| Measure | Nmap-only prerequisite | With supplements |
 | --- | ---: | ---: |
-| Ports with a specific probe | 33,053 | 33,110 |
-| Distinct (port, payload) pairs | 33,077 | 33,204 |
+| Ports with a specific probe | 33,110 | 33,115 |
+| Distinct (port, payload) pairs | 33,204 | 33,212 |
 | Maximum variants on one port | 4 | 4 |
-| Maximum datagrams, `--tries 1` (default) | 65,559 | **65,629** |
-| Maximum datagrams, `--tries 2` | 131,118 | **131,258** |
+| Maximum datagrams, `--tries 1` (default) | 65,629 | **65,632** |
+| Maximum datagrams, `--tries 2` | 131,258 | **131,264** |
 
-The bound is `65,535 - 33,110 + 33,204 = 65,629` datagrams per attempt,
-70 more than the legacy-only prerequisite. Removing the initially retained
-legacy variants reduces the former merged bound of 65,675 by 46: removing the
-4500 probe substitutes an empty datagram rather than removing a datagram.
+The bound is `65,535 - 33,115 + 33,212 = 65,632` datagrams per attempt,
+three more than Nmap alone: one extra QUIC variant and three Digi variants
+replacing one empty datagram. The other new probes replace empty datagrams
+without increasing the count. QUIC contributes 1200 payload bytes per attempt.
 For `--tries N`, multiply by `max(N, 1)`; the CLI treats zero tries as one.
 These are transmitted UDP datagrams, excluding IP/UDP headers, ICMP responses,
 and any separate Nmap follow-up. Explicitly including port 0 adds one empty
@@ -66,9 +89,9 @@ datagram per attempt. These bounds are asserted in `tests/udp_payloads.rs`.
 `tests/fixtures/nmap-udp-selection.tsv` records the actual pinned Nmap payload
 API's output, compressed by grouping identical payload bytes across port ranges.
 Its SHA-256 is `71545be7f0133d2ba9e1335adf203775b3e4cd1eb9dacb58122d954ee16c16b6`.
-The test compares both our parser and the generated lookup directly against
-that reference for **every port 0–65535**. Separate tests enforce uniqueness
-and source ordering.
+The test compares our Nmap parser directly against that reference for
+**every port 0–65535**, then verifies the generated union with the explicit
+supplements. Separate tests enforce uniqueness and source ordering.
 
 To regenerate, extract the [pinned Nmap source archive](https://github.com/nmap/nmap/archive/24229f2e65aa11ca860b5c4ec6b4757dc2d8afd0.tar.gz), then run:
 
@@ -117,3 +140,29 @@ all 24 service-probe scenarios and all six Rust UDP socket tests in an isolated
 Linux container. Rust validation passed: 95 unit/integration tests, seven
 doctests (one ignored), Clippy across all targets with warnings denied,
 formatting, and the documentation build.
+
+## Supplemental validation
+
+The supplemental wire fixtures check every variant over IPv4 and IPv6, with
+silent, closed, and alternate-source-port controls and retry packet counts
+(52 scenarios). The NAT-T fixture independently encodes the IKE proposal and
+only responds to the complete framed request. Rust tests also verify its marker,
+IKE header and length, and agreement with the pinned Nmap IKE body. These checks
+validate wire delivery and classification; representative VPN gateway validation
+is still needed to establish detection gains.
+
+An independent aioquic 1.3.0 server is found over IPv4 and IPv6 by this build
+and missed by the Nmap-only prerequisite binary. This validates a QUIC detection
+gain for that implementation, not a customer detection rate. Digi, Sentinel,
+WSD and Chargen still need representative service/device validation.
+
+```sh
+sudo unshare --net python3 tests/udp_supplemental_probes.py target/debug/rustscan
+python3 -m venv /tmp/rustscan-udp-tests
+/tmp/rustscan-udp-tests/bin/pip install -r tests/udp-requirements.txt
+sudo unshare --net /tmp/rustscan-udp-tests/bin/python tests/udp_quic.py target/debug/rustscan
+# Optionally append the Nmap-only binary path for a before/after comparison.
+```
+
+The new scripts are included in Linux CI. The workflow targets PRs to `master`,
+so stacked drafts require local runs until retargeted.

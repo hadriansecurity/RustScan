@@ -43,3 +43,16 @@ jobs:
 
       - name: Run tests
         run: just test
+
+      - name: Supplemental UDP probe regression
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked
+          sudo unshare --net python3 tests/udp_supplemental_probes.py target/debug/rustscan
+
+      - name: UDP discovery against an independent QUIC server
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/udp-tests"
+          "$RUNNER_TEMP/udp-tests/bin/pip" install -r tests/udp-requirements.txt
+          sudo unshare --net "$RUNNER_TEMP/udp-tests/bin/python" tests/udp_quic.py target/debug/rustscan
