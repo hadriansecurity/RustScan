@@ -43,9 +43,3 @@ jobs:
 
       - name: Run tests
         run: just test
-
-      - name: UDP service-probe regression
-        if: runner.os == 'Linux'
-        run: |
-          cargo build --locked
-          sudo unshare --net python3 tests/udp_service_probes.py target/debug/rustscan

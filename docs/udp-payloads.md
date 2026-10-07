@@ -104,7 +104,7 @@ cargo test --locked --lib udp_socket_tests -- --ignored
 sudo unshare --net python3 tests/udp_service_probes.py target/debug/rustscan
 ```
 
-The service-probe script runs in Linux CI for PRs targeting master. The Rust
+The service-probe script is run manually using the commands above. The Rust
 UDP socket tests run in the manually dispatched UDP regression workflow.
 These controlled results and payload parity do
 not establish detection rates on arbitrary services. The earlier 115-port
