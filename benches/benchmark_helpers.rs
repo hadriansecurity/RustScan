@@ -125,7 +125,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("udp payload lookup/new hashmap 1..4096", |b| {
         b.iter(|| {
             for &p in ports.iter() {
-                let payload = lookup.get(&p).copied().unwrap_or(b"");
+                let payload = lookup.get(&p).unwrap_or_default();
                 black_box(payload);
             }
         })

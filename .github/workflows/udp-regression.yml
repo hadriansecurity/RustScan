@@ -1,0 +1,27 @@
+name: UDP regression
+
+# Runs the ignored Rust UDP socket tests against loopback listeners.
+# These tests are skipped by the default test suite and run only when this
+# workflow is started by hand.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  udp-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Loopback socket tests
+        run: cargo test --locked --lib udp_socket_tests -- --ignored
