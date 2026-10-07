@@ -1,7 +1,7 @@
 #[path = "build/nmap_payloads.rs"]
 mod nmap_payloads;
 
-use std::{fs, process::Command};
+use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=build/nmap_payloads.rs");
@@ -9,11 +9,6 @@ fn main() {
     let services = fs::read_to_string("nmap-service-probes").expect("read nmap-service-probes");
     let entries =
         nmap_payloads::parse_service_probes(&services).expect("invalid nmap-service-probes");
-    fs::write("src/generated.rs", nmap_payloads::generate(entries))
-        .expect("write generated UDP table");
-    Command::new("cargo")
-        .arg("fmt")
-        .arg("--all")
-        .output()
-        .expect("Failed to execute cargo fmt");
+    let dest = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR")).join("udp_payloads.rs");
+    fs::write(dest, nmap_payloads::generate(entries)).expect("write generated UDP table");
 }
