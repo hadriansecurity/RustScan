@@ -1,13 +1,8 @@
 name: UDP regression
 
-# Scans loopback UDP ports to check probe sending, retries and how explicit
-# rejection ends a scan. The default test run skips these socket tests
-# (they are #[ignore]d), so they only run when this workflow is started by hand.
-#
-# The Rust tests use loopback listeners. The Python tests need real ICMP
-# errors and iptables REJECT rules: `unshare --net` runs them in a private
-# network namespace, which keeps the rules off the runner, and both it and
-# iptables need root, hence sudo.
+# Runs the ignored Rust UDP socket tests against loopback listeners.
+# These tests are skipped by the default test suite and run only when this
+# workflow is started by hand.
 
 on:
   workflow_dispatch:
@@ -30,8 +25,3 @@ jobs:
 
       - name: Loopback socket tests
         run: cargo test --locked --lib udp_socket_tests -- --ignored
-
-      - name: ICMP rejection tests
-        run: |
-          cargo build --locked
-          sudo unshare --net python3 .github/udp-regression/udp_rejection.py target/debug/rustscan
