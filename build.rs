@@ -29,7 +29,8 @@ pub fn main() {
         // identically to LF ones (otherwise `\r` pollutes port tokens and
         // blank lines stop looking blank).
         let line = line.strip_suffix('\r').unwrap_or(line);
-        if line.contains('#') || line.is_empty() {
+        let line = strip_comment(line).trim_end();
+        if line.trim_start().is_empty() {
             continue;
         }
 
@@ -49,6 +50,9 @@ pub fn main() {
             curr.push_str(line);
         }
     }
+    if !curr.is_empty() {
+        fp_map.insert(count, curr);
+    }
 
     let pb_linenr = ports_v(&fp_map);
     let payb_linenr = payloads_v(&fp_map);
@@ -57,19 +61,48 @@ pub fn main() {
     generate_code(map);
 }
 
+/// Removes a trailing `#` comment from a line of the payload file.
+///
+/// A `#` inside a quoted payload segment is payload data, not a comment.
+///
+/// # Arguments
+///
+/// * `line` - One line of the payload file
+///
+/// # Returns
+///
+/// The line up to, but not including, its first unquoted `#`
+fn strip_comment(line: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in line.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b'#' if !quoted => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
 /// Generates a file called Generated.rs and calls cargo fmt from the command line
 ///
 /// # Arguments
 ///
-/// * `port_payload_map` - A BTreeMap mapping port numbers to payload data
-fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<u8>>) {
+/// * `port_payload_map` - A BTreeMap mapping port lists to their payload variants
+fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
     let dest_path = PathBuf::from("src/generated.rs");
 
     let mut generated_code = String::new();
     generated_code.push_str("use std::collections::BTreeMap;\n");
     generated_code.push_str("use once_cell::sync::Lazy;\n\n");
 
-    generated_code.push_str("fn generated_data() -> BTreeMap<Vec<u16>, Vec<u8>> {\n");
+    generated_code.push_str("fn generated_data() -> BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
     generated_code.push_str("    let mut map = BTreeMap::new();\n");
 
     for (ports, payloads) in port_payload_map {
@@ -82,13 +115,17 @@ fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<u8>>) {
                 .join(","),
         );
         generated_code.push_str("], vec![");
-        generated_code.push_str(
-            &payloads
-                .iter()
-                .map(|&p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+        for payload in payloads {
+            generated_code.push_str("vec![");
+            generated_code.push_str(
+                &payload
+                    .iter()
+                    .map(|&p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            generated_code.push_str("],");
+        }
         generated_code.push_str("]);\n");
     }
 
@@ -96,9 +133,10 @@ fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<u8>>) {
     generated_code.push_str("}\n\n");
 
     generated_code.push_str(
-        "static PARSED_DATA: Lazy<BTreeMap<Vec<u16>, Vec<u8>>> = Lazy::new(generated_data);\n",
+        "static PARSED_DATA: Lazy<BTreeMap<Vec<u16>, Vec<Vec<u8>>>> = Lazy::new(generated_data);\n",
     );
-    generated_code.push_str("pub fn get_parsed_data() -> &'static BTreeMap<Vec<u16>, Vec<u8>> {\n");
+    generated_code
+        .push_str("pub fn get_parsed_data() -> &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
     generated_code.push_str("    &PARSED_DATA\n");
     generated_code.push_str("}\n");
 
@@ -138,17 +176,18 @@ fn ports_v(fp_map: &BTreeMap<i32, String>) -> BTreeMap<i32, Vec<u16>> {
                     let range: Vec<&str> = segment.trim().split('-').collect();
                     let start = range[0].parse::<u16>().unwrap();
                     let end = range[1].parse::<u16>().unwrap();
+                    assert!(start <= end, "reversed port range: {}", segment);
 
-                    for port in start..end {
-                        port_list.push(port);
-                    }
+                    port_list.extend(start..=end);
                 } else if !segment.is_empty() {
                     match segment.parse::<u16>() {
                         Ok(port) => port_list.push(port),
-                        Err(_) => println!("Error parsing port: {segment}"),
+                        Err(_) => panic!("invalid port: {}", segment),
                     }
                 }
             }
+            port_list.sort_unstable();
+            port_list.dedup();
         }
 
         pb_linenr.insert(line_nr, port_list.clone());
@@ -287,17 +326,21 @@ fn decode_segment(segment: &str, bytes: &mut Vec<u8>) {
 ///
 /// # Returns
 ///
-/// A BTreeMap mapping vectors of ports to vectors of payload bytes
+/// A BTreeMap mapping vectors of ports to their payload variants, in file
+/// order. Entries that share a port list keep every distinct payload.
 fn port_payload_map(
     pb_linenr: BTreeMap<i32, Vec<u16>>,
     payb_linenr: BTreeMap<i32, Vec<u8>>,
-) -> BTreeMap<Vec<u16>, Vec<u8>> {
-    let mut ppm_fin: BTreeMap<Vec<u16>, Vec<u8>> = BTreeMap::new();
+) -> BTreeMap<Vec<u16>, Vec<Vec<u8>>> {
+    let mut ppm_fin: BTreeMap<Vec<u16>, Vec<Vec<u8>>> = BTreeMap::new();
 
     for (port_linenr, ports) in pb_linenr {
         for (pay_linenr, payloads) in &payb_linenr {
             if pay_linenr == &port_linenr {
-                ppm_fin.insert(ports.to_vec(), payloads.to_vec());
+                let variants = ppm_fin.entry(ports.to_vec()).or_default();
+                if !variants.contains(payloads) {
+                    variants.push(payloads.to_vec());
+                }
             }
         }
     }

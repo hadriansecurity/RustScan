@@ -37,11 +37,14 @@ fn bench_address_parsing() {
 
 // Replicates the old UDP payload selection behavior:
 // scan the whole UDP payload map and find the last payload whose port list contains `port`.
-fn old_payload_for_port(udp_map: &'static BTreeMap<Vec<u16>, Vec<u8>>, port: u16) -> &'static [u8] {
+fn old_payload_for_port(
+    udp_map: &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
+    port: u16,
+) -> &'static [u8] {
     let mut payload: &'static [u8] = b"";
-    for (ports, value) in udp_map.iter() {
+    for (ports, variants) in udp_map.iter() {
         if ports.contains(&port) {
-            payload = value.as_slice();
+            payload = variants.last().map_or(b"", Vec::as_slice);
         }
     }
     payload

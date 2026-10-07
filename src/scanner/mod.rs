@@ -66,10 +66,17 @@ fn filter_excluded_ports(mut ports: Vec<u16>, excluded: &[u16]) -> Vec<u16> {
 pub type UdpPayloadLookup = HashMap<u16, &'static [u8]>;
 
 #[doc(hidden)]
-pub fn build_udp_payload_lookup(udp_map: &'static BTreeMap<Vec<u16>, Vec<u8>>) -> UdpPayloadLookup {
+pub fn build_udp_payload_lookup(
+    udp_map: &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
+) -> UdpPayloadLookup {
     let mut lookup: UdpPayloadLookup = HashMap::new();
 
-    for (ports, payload_vec) in udp_map.iter() {
+    for (ports, variants) in udp_map.iter() {
+        // One probe per port: the last variant is the probe sent before
+        // duplicate port lists kept every variant.
+        let Some(payload_vec) = variants.last() else {
+            continue;
+        };
         let payload: &'static [u8] = payload_vec.as_slice();
         for &port in ports.iter() {
             // Preserve existing behavior: if duplicates exist, last insert wins.
@@ -747,17 +754,17 @@ mod tests {
     /// decoding mangled it into a 28-byte probe that agents never answered.
     #[test]
     fn udp_snmp_probe_bytes_match_nmap() {
-        let payload = get_parsed_data()
+        let variants = get_parsed_data()
             .iter()
             .find(|(ports, _)| ports.contains(&161))
-            .map(|(_, payload)| payload)
+            .map(|(_, variants)| variants)
             .expect("no UDP payload registered for port 161");
         let expected: Vec<u8> = vec![
             0x30, 0x1f, 0x02, 0x01, 0x00, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa1,
             0x12, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x07, 0x30, 0x05,
             0x06, 0x01, 0x00, 0x05, 0x00,
         ];
-        assert_eq!(*payload, expected);
+        assert!(variants.contains(&expected), "{:?}", variants);
     }
 
     /// The SSDP probe mixes `\xNN` escapes, `\"` escapes and literal text
@@ -768,7 +775,7 @@ mod tests {
         let payload = get_parsed_data()
             .iter()
             .find(|(ports, _)| ports.contains(&1900))
-            .map(|(_, payload)| payload)
+            .and_then(|(_, variants)| variants.last())
             .expect("no UDP payload registered for port 1900");
         let expected =
             b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 5\r\nST: ssdp:all\r\n\r\n"
