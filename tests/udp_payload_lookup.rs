@@ -1,5 +1,6 @@
 use rustscan::generated::get_parsed_data;
 use rustscan::scanner::build_udp_payload_lookup;
+use std::collections::HashMap;
 
 #[test]
 fn udp_payload_lookup_contains_common_udp_ports() {
@@ -25,10 +26,16 @@ fn udp_payload_lookup_payloads_are_non_empty_for_known_ports() {
     // Don't assert exact bytes (the generated payload set may evolve),
     // but it should not be empty for these well-known protocols.
     let dns = lookup.get(&53).expect("missing DNS payload");
-    assert!(!dns.is_empty(), "DNS payload should not be empty");
+    assert!(
+        dns.iter().all(|payload| !payload.is_empty()),
+        "DNS payload should not be empty"
+    );
 
     let ntp = lookup.get(&123).expect("missing NTP payload");
-    assert!(!ntp.is_empty(), "NTP payload should not be empty");
+    assert!(
+        ntp.iter().all(|payload| !payload.is_empty()),
+        "NTP payload should not be empty"
+    );
 }
 
 fn variants_for(port: u16) -> Vec<&'static Vec<u8>> {
@@ -86,12 +93,29 @@ fn trailing_comments_are_not_part_of_the_payload() {
 }
 
 #[test]
-fn lookup_sends_the_last_variant_of_a_record() {
+fn lookup_sends_every_variant_of_a_port() {
     let lookup = build_udp_payload_lookup(get_parsed_data());
-    let last = variants_for(623)
-        .last()
-        .copied()
-        .expect("no payload for 623");
 
-    assert_eq!(lookup.get(&623).copied(), Some(last.as_slice()));
+    let mut expected: HashMap<u16, Vec<&[u8]>> = HashMap::new();
+    for (ports, variants) in get_parsed_data() {
+        for &port in ports {
+            let probes = expected.entry(port).or_default();
+            for variant in variants {
+                if !probes.contains(&variant.as_slice()) {
+                    probes.push(variant);
+                }
+            }
+        }
+    }
+
+    for port in 0..=u16::MAX {
+        let probes = expected.get(&port).map_or(&[][..], Vec::as_slice);
+        assert_eq!(
+            lookup.get(&port).unwrap_or_default(),
+            probes,
+            "port {}",
+            port
+        );
+    }
+    assert_eq!(lookup.get(&623).map(<[_]>::len), Some(2));
 }

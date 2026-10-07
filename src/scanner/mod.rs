@@ -20,12 +20,13 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr},
     num::NonZeroU8,
+    ops::Range,
     sync::Arc,
     time::Duration,
 };
 use tokio::io::Interest;
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::time::{sleep, timeout};
+use tokio::time::{sleep, timeout, timeout_at, Instant};
 
 /// How many sockets the scan starts or finishes (counted together) between
 /// two polls of the runtime's I/O driver; see `Scanner::scan_sockets`.
@@ -58,29 +59,53 @@ fn filter_excluded_ports(mut ports: Vec<u16>, excluded: &[u16]) -> Vec<u16> {
     ports
 }
 
-/// UDP payload lookup: port -> payload bytes
+/// UDP payload lookup: port -> probe variants
 ///
 /// `get_parsed_data()` returns a `&'static BTreeMap<...>`, so we can store
-/// references to the payload bytes without cloning them.
+/// references to the payload bytes without cloning them. Every port's
+/// variants are a range of one shared table, so building the lookup for
+/// some 33,000 ports allocates no list per port.
 #[doc(hidden)]
-pub type UdpPayloadLookup = HashMap<u16, &'static [u8]>;
+#[derive(Default)]
+pub struct UdpPayloadLookup {
+    probes: Vec<&'static [u8]>,
+    ports: HashMap<u16, Range<usize>>,
+}
+
+impl UdpPayloadLookup {
+    pub fn get(&self, port: &u16) -> Option<&[&'static [u8]]> {
+        self.ports
+            .get(port)
+            .map(|range| &self.probes[range.clone()])
+    }
+
+    pub fn contains_key(&self, port: &u16) -> bool {
+        self.ports.contains_key(port)
+    }
+}
 
 #[doc(hidden)]
 pub fn build_udp_payload_lookup(
     udp_map: &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
 ) -> UdpPayloadLookup {
-    let mut lookup: UdpPayloadLookup = HashMap::new();
+    let mut lookup = UdpPayloadLookup::default();
 
     for (ports, variants) in udp_map.iter() {
-        // One probe per port: the last variant is the probe sent before
-        // duplicate port lists kept every variant.
-        let Some(payload_vec) = variants.last() else {
-            continue;
-        };
-        let payload: &'static [u8] = payload_vec.as_slice();
+        let start = lookup.probes.len();
+        lookup.probes.extend(variants.iter().map(Vec::as_slice));
+        let range = start..lookup.probes.len();
         for &port in ports.iter() {
-            // Preserve existing behavior: if duplicates exist, last insert wins.
-            lookup.insert(port, payload);
+            let Some(previous) = lookup.ports.insert(port, range.clone()) else {
+                continue;
+            };
+            let merged = lookup.probes.len();
+            for index in previous.chain(range.clone()) {
+                let probe = lookup.probes[index];
+                if !lookup.probes[merged..].contains(&probe) {
+                    lookup.probes.push(probe);
+                }
+            }
+            lookup.ports.insert(port, merged..lookup.probes.len());
         }
     }
 
@@ -397,28 +422,75 @@ impl Scanner {
         unreachable!();
     }
 
+    /// Sends every probe variant for the port back-to-back, then waits for a
+    /// reply, with one timeout per attempt covering both. The socket is kept
+    /// across attempts, so a late reply to an earlier attempt still counts.
+    /// An explicit rejection ends the scan without waiting or retrying.
     async fn scan_udp_socket(
         &self,
         socket: SocketAddr,
         udp_payloads: Option<Arc<UdpPayloadLookup>>,
     ) -> io::Result<PortStatus> {
-        let payload: &[u8] = udp_payloads
+        const EMPTY_PROBE: &[&[u8]] = &[b""];
+        let payloads: &[&[u8]] = udp_payloads
             .as_ref()
-            .and_then(|m| m.get(&socket.port()).copied())
-            .unwrap_or(b"");
+            .and_then(|m| m.get(&socket.port()))
+            .filter(|probes| !probes.is_empty())
+            .unwrap_or(EMPTY_PROBE);
 
-        let tries = self.tries.get();
-        for _ in 1..=tries {
-            match self.udp_scan(socket, payload, self.timeout).await {
-                Ok(true) => return Ok(PortStatus::Open(socket)),
-                Ok(false) => continue,
+        let udp_socket = Self::udp_bind(socket).inspect_err(|e| {
+            debug!("Error binding UDP socket: {e:?}");
+        })?;
+        udp_socket.connect(socket)?;
+        let mut buf = [0u8; 1024];
+        let mut refusals = UdpSendRefusals::new(payloads.len() > 1);
+        let first_deadline = Instant::now() + self.timeout;
+
+        // Send the probes and try the first receive straight away, as
+        // async-std did. Tokio's readiness-based I/O would first wait for the
+        // reactor to report the socket ready, costing every probe extra trips
+        // through the event loop, while the probes can almost always be sent
+        // immediately and, on the local host, the answer (often an ICMP "port
+        // unreachable", seen as a refused connection) is usually already
+        // there when the sends return. The socket is only registered with
+        // Tokio when we really have to wait.
+        let unsent = send_probes(|probe| udp_socket.send(probe), payloads, &mut refusals)?;
+        refusals.finish()?;
+        if unsent.is_empty() {
+            match udp_socket.recv(&mut buf) {
+                Ok(size) => return Ok(self.udp_open(socket, size)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) => return Err(e),
+            }
+        }
+
+        let udp_socket = UdpSocket::from_std(udp_socket)?;
+        for attempt in 0..self.tries.get() {
+            let (probes, deadline) = if attempt == 0 {
+                (unsent, first_deadline)
+            } else {
+                (payloads, Instant::now() + self.timeout)
+            };
+            let exchange = udp_exchange(&udp_socket, probes, &mut refusals, &mut buf);
+            let result = timeout_at(deadline, exchange).await;
+            // A timeout while sending must not retry a known rejection.
+            refusals.finish()?;
+            match result {
+                Ok(Ok(size)) => return Ok(self.udp_open(socket, size)),
+                Ok(Err(e)) if e.kind() != io::ErrorKind::TimedOut => return Err(e),
+                _ => {}
             }
         }
 
         Err(io::Error::other(format!(
             "UDP scan timed-out for all tries on socket {socket}"
         )))
+    }
+
+    fn udp_open(&self, socket: SocketAddr, size: usize) -> PortStatus {
+        debug!("Received {size} bytes");
+        self.fmt_ports(socket);
+        PortStatus::Open(socket)
     }
 
     /// Performs the connection to the socket with timeout
@@ -454,83 +526,6 @@ impl Scanner {
         Ok(udp_socket)
     }
 
-    /// Performs a UDP scan on the specified socket with a payload and wait duration
-    /// # Example
-    ///
-    /// ```compile_fail
-    /// # use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-    /// # use std::time::Duration;
-    /// let port: u16 = 123;
-    /// // ip is an IpAddr type
-    /// let ip = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
-    /// let socket = SocketAddr::new(ip, port);
-    /// let payload = vec![0, 1, 2, 3];
-    /// let wait = Duration::from_secs(1);
-    /// let result = scanner.udp_scan(socket, payload, wait).await;
-    /// // returns Result which is either Ok(true) if response received, or Ok(false) if timed out.
-    /// // Err is returned for other I/O errors.
-    async fn udp_scan(
-        &self,
-        socket: SocketAddr,
-        payload: &[u8],
-        wait: Duration,
-    ) -> io::Result<bool> {
-        let udp_socket = match Self::udp_bind(socket) {
-            Ok(udp_socket) => udp_socket,
-            Err(e) => {
-                debug!("Error binding UDP socket: {e:?}");
-                return Err(e);
-            }
-        };
-        let mut buf = [0u8; 1024];
-
-        udp_socket.connect(socket)?;
-
-        // Send the probe and try the first receive straight away, as
-        // async-std did. Tokio's readiness-based I/O would first wait for the
-        // reactor to report the socket ready, costing every probe extra trips
-        // through the event loop, while the probe can almost always be sent
-        // immediately and, on the local host, the answer (often an ICMP "port
-        // unreachable", seen as a refused connection) is usually already
-        // there when the send returns. The socket is only registered with
-        // Tokio when we really have to wait.
-        let sent = match udp_socket.send(payload) {
-            Ok(_) => true,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
-            Err(e) => return Err(e),
-        };
-        let early = if sent {
-            udp_socket.recv(&mut buf)
-        } else {
-            Err(io::ErrorKind::WouldBlock.into())
-        };
-
-        let received = match early {
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                let udp_socket = UdpSocket::from_std(udp_socket)?;
-                if !sent {
-                    udp_socket.send(payload).await?;
-                }
-                match timeout(wait, recv_or_error(&udp_socket, &mut buf)).await {
-                    Ok(received) => received,
-                    // Nothing came back in time.
-                    Err(_elapsed) => return Ok(false),
-                }
-            }
-            early => early,
-        };
-
-        match received {
-            Ok(size) => {
-                debug!("Received {size} bytes");
-                self.fmt_ports(socket);
-                Ok(true)
-            }
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
     /// Formats and prints the port status
     fn fmt_ports(&self, socket: SocketAddr) {
         if self.print_open_ports && !self.greppable {
@@ -551,6 +546,86 @@ impl Scanner {
                 println_safe(format_args!("Closed {}", socket.to_string().red()));
             }
         }
+    }
+}
+
+/// Sends `probes` back-to-back until they are all sent or the socket would
+/// block, and returns the probes left unsent.
+///
+/// A connected UDP socket can surface an earlier probe's ICMP rejection on a
+/// later send, before that payload leaves the socket. Such a send is retried a
+/// bounded number of times, so a peer that keeps rejecting cannot stall it.
+fn send_probes<'a>(
+    mut send: impl FnMut(&[u8]) -> io::Result<usize>,
+    probes: &'a [&'a [u8]],
+    refusals: &mut UdpSendRefusals,
+) -> io::Result<&'a [&'a [u8]]> {
+    let mut unsent = probes;
+    while let Some((probe, rest)) = unsent.split_first() {
+        for _ in 0..=probes.len() {
+            match send(probe) {
+                Ok(_) => break,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(unsent),
+                Err(e) => refusals.record(e)?,
+            }
+        }
+        unsent = rest;
+    }
+    Ok(unsent)
+}
+
+/// Sends `probes` on a connected UDP socket, then waits for a reply or the
+/// error the peer answers with.
+async fn udp_exchange(
+    socket: &UdpSocket,
+    probes: &[&[u8]],
+    refusals: &mut UdpSendRefusals,
+    buf: &mut [u8],
+) -> io::Result<usize> {
+    let mut unsent = probes;
+    while !unsent.is_empty() {
+        socket.writable().await?;
+        unsent = send_probes(|probe| socket.try_send(probe), unsent, refusals)?;
+    }
+    refusals.finish()?;
+    recv_or_error(socket, buf).await
+}
+
+/// Remembers an ICMP rejection surfaced by a send while the rest of a
+/// multi-probe burst goes out, so the scan can stop on it afterwards.
+/// Single-probe scans and local or resource errors fail straight away.
+struct UdpSendRefusals {
+    multiple: bool,
+    last: Option<io::Error>,
+}
+
+impl UdpSendRefusals {
+    fn new(multiple: bool) -> Self {
+        Self {
+            multiple,
+            last: None,
+        }
+    }
+
+    fn record(&mut self, error: io::Error) -> io::Result<()> {
+        if self.multiple && Self::is_refusal(&error) {
+            self.last = Some(error);
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.last.take().map_or(Ok(()), Err)
+    }
+
+    fn is_refusal(error: &io::Error) -> bool {
+        // Winsock reports an ICMP port-unreachable as ConnectionReset.
+        matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
+        )
     }
 }
 
@@ -606,6 +681,9 @@ async fn recv_or_error(socket: &UdpSocket, buf: &mut [u8]) -> io::Result<usize> 
 fn timed_out() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "future timed out")
 }
+
+#[cfg(test)]
+mod udp_socket_tests;
 
 #[cfg(test)]
 mod tests {
@@ -737,6 +815,35 @@ mod tests {
             .with_interval(interval);
 
             assert!(runtime.block_on(scanner.run_with_status()).is_empty());
+        }
+    }
+
+    #[test]
+    fn send_refusals_are_kept_only_for_multi_probe_bursts() {
+        for kind in [
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::ConnectionReset,
+        ] {
+            let mut multiple = UdpSendRefusals::new(true);
+            assert!(multiple.record(kind.into()).is_ok());
+            assert_eq!(multiple.finish().unwrap_err().kind(), kind);
+            assert!(multiple.finish().is_ok());
+
+            let mut single = UdpSendRefusals::new(false);
+            assert_eq!(single.record(kind.into()).unwrap_err().kind(), kind);
+        }
+    }
+
+    #[test]
+    fn local_send_errors_fail_a_burst_straight_away() {
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::OutOfMemory,
+            io::ErrorKind::AddrNotAvailable,
+        ] {
+            let mut multiple = UdpSendRefusals::new(true);
+            assert_eq!(multiple.record(kind.into()).unwrap_err().kind(), kind);
+            assert!(multiple.finish().is_ok());
         }
     }
 
