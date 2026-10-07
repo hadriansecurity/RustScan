@@ -7,6 +7,7 @@ import collections
 import hashlib
 import pathlib
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -16,16 +17,36 @@ import xml.etree.ElementTree as ET
 BINARY = str(pathlib.Path(sys.argv.pop(1)).resolve())
 VENDOR = pathlib.Path(__file__).resolve().parents[1] / "probes/zmap"
 QUIC = b"\xc0\x0a\x0a\x0a\x0a\x08rustscan\x08udp-prob" + bytes(1177)
+
+
+# Independently encode the IKEv1 SA proposal (RFC 2408/2409), then add
+# the Non-ESP Marker (RFC 3948 section 2.2). Do not load the Rust probe bytes.
+def ike_natt_request():
+    transforms = []
+    for index, (cipher, digest) in enumerate([(5, 2), (5, 1), (1, 2), (1, 1)], 1):
+        attributes = struct.pack("!10H", 0x8001, cipher, 0x8002, digest,
+                                 0x8003, 1, 0x8004, 2, 0x800b, 1)
+        attributes += struct.pack("!HHI", 0x000c, 4, 1)  # One-second lifetime.
+        transforms.append(struct.pack("!BBHBBBB", 3 if index < 4 else 0,
+                                      0, 36, index, 1, 0, 0) + attributes)
+    proposal = struct.pack("!BBHBBBB", 0, 0, 152, 1, 1, 0, 4) + b"".join(transforms)
+    sa = struct.pack("!BBHII", 0, 0, 164, 1, 1) + proposal
+    header = struct.pack("!QQBBBBII", 0x0011223344556677, 0, 1, 0x10, 2, 0, 0, 192)
+    return bytes(4) + header + sa
+
+
+IKE_NAT_T = ike_natt_request()
 PROBES = {
     19: [b"\x01"],
     443: [QUIC],
     2362: [magic + bytes.fromhex("00010006ffffffffffff")
            for magic in [b"DIGI", b"DVKT", b"DGDP"]],
     3702: [(VENDOR / "wsd_3702.pkt").read_bytes()],
+    4500: [IKE_NAT_T],
     5093: [b"\x7a" + bytes(5)],
 }
 # Includes the three retained Nmap variants on 443.
-VARIANTS = {19: 1, 443: 4, 2362: 3, 3702: 1, 5093: 1}
+VARIANTS = {19: 1, 443: 4, 2362: 3, 3702: 1, 4500: 1, 5093: 1}
 
 
 def scan(port, host):

@@ -33,22 +33,30 @@ identification.
 The old `nmap-payloads` snapshot and its parser have been removed. Its 47
 legacy-only pairs were mostly older or different requests on ports already
 covered by Nmap, rather than demonstrated additional coverage. UDP/4500 is the
-only destination that loses a specific probe and now receives an empty datagram,
-as it does with this Nmap pin. No local exception is retained. SQL Browser's
+only destination that loses a specific probe in Nmap. The supplement below
+provides a correctly framed replacement for this port. SQL Browser's
 `no-payload` exclusion is also preserved.
 
 ## Supplemental probes
 
-Seven additional variants cover QUIC/443, Chargen/19, three Digi ADDP/2362
-families, WS-Discovery/3702, and Sentinel/5093. Six packets are pinned from
-ZMap; the QUIC packet uses a reserved version and 1200-byte padding to elicit
+Eight additional variants cover QUIC/443, Chargen/19, three Digi ADDP/2362
+families, WS-Discovery/3702, IPsec NAT-T/4500, and Sentinel/5093. Six packets
+are pinned from ZMap; the QUIC packet uses a reserved version and 1200-byte padding to elicit
 Version Negotiation. It does not complete TLS or identify HTTP/3. The WSD
 packet requests DPWS devices, not every WS-Discovery service type. See
 [provenance and validation limits](../probes/zmap/README.md).
 
+UDP/4500 uses the pinned Nmap `IKE_MAIN_MODE` request prefixed with four zero
+bytes, the Non-ESP Marker required by [RFC 3948 section 2.2](https://www.rfc-editor.org/rfc/rfc3948.html#section-2.2).
+The 196-byte datagram contains a 192-byte IKE message; the IKE length excludes
+the marker. The old `IPSEC_START` mapping sent an unframed IKE request to both
+500 and 4500. This supplement leaves port 500 and the Nmap database unchanged.
+It probes IKEv1 Main Mode only; IKEv2-only endpoints and gateways requiring
+negotiation on port 500 first may remain silent. It does not establish a VPN.
+
 The Nmap database and eligibility rules remain unchanged. SQL Browser is still
 excluded; RDP is deferred pending Windows validation. Including supplements,
-there are 33,114 covered ports, 33,211 pairs, and 87 ports with multiple variants.
+there are 33,115 covered ports, 33,212 pairs, and 87 ports with multiple variants.
 
 ## Packet budget
 
@@ -61,13 +69,13 @@ For ports **1–65535**, per target IP:
 
 | Measure | Nmap-only prerequisite | With supplements |
 | --- | ---: | ---: |
-| Ports with a specific probe | 33,110 | 33,114 |
-| Distinct (port, payload) pairs | 33,204 | 33,211 |
+| Ports with a specific probe | 33,110 | 33,115 |
+| Distinct (port, payload) pairs | 33,204 | 33,212 |
 | Maximum variants on one port | 4 | 4 |
 | Maximum datagrams, `--tries 1` (default) | 65,629 | **65,632** |
 | Maximum datagrams, `--tries 2` | 131,258 | **131,264** |
 
-The bound is `65,535 - 33,114 + 33,211 = 65,632` datagrams per attempt,
+The bound is `65,535 - 33,115 + 33,212 = 65,632` datagrams per attempt,
 three more than Nmap alone: one extra QUIC variant and three Digi variants
 replacing one empty datagram. The other new probes replace empty datagrams
 without increasing the count. QUIC contributes 1200 payload bytes per attempt.
@@ -133,13 +141,15 @@ Linux container. Rust validation passed: 95 unit/integration tests, seven
 doctests (one ignored), Clippy across all targets with warnings denied,
 formatting, and the documentation build.
 
-## Supplemental validation (2026-10-06)
+## Supplemental validation
 
-After rebasing onto the Nmap-only prerequisite, this build passes 94 Rust
-unit/integration tests, seven doctests (one ignored), Clippy across all targets,
-formatting, and documentation build. All original network regressions and the
-44 supplemental IPv4/IPv6 fixture scenarios pass, including actual retry packet
-counts and silent/closed/alternate-source-port controls with no false positives.
+The supplemental wire fixtures check every variant over IPv4 and IPv6, with
+silent, closed, and alternate-source-port controls and retry packet counts
+(52 scenarios). The NAT-T fixture independently encodes the IKE proposal and
+only responds to the complete framed request. Rust tests also verify its marker,
+IKE header and length, and agreement with the pinned Nmap IKE body. These checks
+validate wire delivery and classification; representative VPN gateway validation
+is still needed to establish detection gains.
 
 An independent aioquic 1.3.0 server is found over IPv4 and IPv6 by this build
 and missed by the Nmap-only prerequisite binary. This validates a QUIC detection

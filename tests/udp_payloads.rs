@@ -8,6 +8,7 @@ mod build_script;
 mod supplemental_payloads;
 
 use rustscan::generated::payloads_for;
+use std::convert::TryInto;
 
 #[test]
 fn service_probe_selection_matches_nmap_eligibility() {
@@ -73,8 +74,6 @@ fn no_payload_service_probe_is_not_added_to_discovery() {
     // Sqlping is version-detection-only; there is no discovery probe on 1434.
     assert!(!payloads_for(1434).contains(&b"\x02".as_slice()));
     assert!(payloads_for(1434).is_empty());
-    // This legacy-only destination now uses the same empty fallback as Nmap.
-    assert!(payloads_for(4500).is_empty());
 }
 
 #[test]
@@ -244,7 +243,7 @@ fn vendored_database_coverage_and_packet_budget_are_preserved() {
     );
     assert_eq!(
         actual,
-        (33_114, 33_211, 87, Some(4)),
+        (33_115, 33_212, 87, Some(4)),
         "probe coverage changed: investigate lost probes or update after syncing the Nmap databases"
     );
 }
@@ -269,4 +268,28 @@ fn quic_probe_uses_a_reserved_version_and_minimum_initial_datagram_size() {
     assert_eq!(probe[14], 8);
     assert_ne!(&probe[6..14], &probe[15..23]);
     assert!(probe[23..].iter().all(|&byte| byte == 0));
+}
+
+#[test]
+fn natt_probe_has_non_esp_marker_and_unmodified_ike_message() {
+    let probes = payloads_for(4500);
+    assert_eq!(probes.len(), 1);
+    let probe = probes[0];
+    assert_eq!(probe.len(), 196);
+    assert_eq!(&probe[..4], &[0; 4]);
+    let ike = &probe[4..];
+    assert_eq!(&ike[..8], b"\x00\x11\x22\x33\x44\x55\x66\x77");
+    assert_eq!(&ike[8..16], &[0; 8]); // No responder cookie yet.
+    assert_eq!(&ike[16..20], &[1, 0x10, 2, 0]); // SA, IKEv1, Main Mode, flags.
+    assert_eq!(&ike[20..24], &[0; 4]); // Initial exchange message ID.
+    assert_eq!(
+        u32::from_be_bytes(ike[24..28].try_into().unwrap()) as usize,
+        ike.len()
+    );
+    let nmap = build_script::parse_service_probes(include_str!("../nmap-service-probes")).unwrap();
+    assert!(!nmap.iter().any(|entry| entry.ports.contains(&4500)));
+    assert!(nmap
+        .iter()
+        .any(|entry| entry.ports.contains(&500) && entry.payload == ike));
+    assert!(!payloads_for(500).contains(&probe)); // NAT-T framing is only for 4500.
 }
