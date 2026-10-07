@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::fs::{self, File};
 
 use std::env;
@@ -98,47 +99,69 @@ fn strip_comment(line: &str) -> &str {
 fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
     let dest_path = PathBuf::from("src/generated.rs");
 
-    let mut generated_code = String::new();
-    generated_code.push_str("use std::collections::BTreeMap;\n");
-    generated_code.push_str("use once_cell::sync::Lazy;\n\n");
-
-    generated_code.push_str("fn generated_data() -> BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
-    generated_code.push_str("    let mut map = BTreeMap::new();\n");
-
-    for (ports, payloads) in port_payload_map {
-        generated_code.push_str("    map.insert(vec![");
-        generated_code.push_str(
-            &ports
-                .iter()
-                .map(|&p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        generated_code.push_str("], vec![");
-        for payload in payloads {
-            generated_code.push_str("vec![");
-            generated_code.push_str(
-                &payload
-                    .iter()
-                    .map(|&p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            generated_code.push_str("],");
+    // Keep the runtime lookup's BTreeMap traversal order, including ports
+    // appearing in several records, but resolve it once during the build.
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+    for (port_list, variants) in port_payload_map {
+        for payload in variants {
+            let index = match payloads.iter().position(|known| known == &payload) {
+                Some(index) => index,
+                None => {
+                    payloads.push(payload);
+                    payloads.len() - 1
+                }
+            };
+            for &port in &port_list {
+                let probes = ports.entry(port).or_default();
+                if !probes.contains(&index) {
+                    probes.push(index);
+                }
+            }
         }
-        generated_code.push_str("]);\n");
     }
 
-    generated_code.push_str("    map\n");
-    generated_code.push_str("}\n\n");
+    // Coalesce adjacent ports with identical probes. This keeps the large
+    // RPC range compact without allocating a slot for every port at runtime.
+    let mut ranges: Vec<(u16, u16, Vec<usize>)> = Vec::new();
+    for (port, probes) in ports {
+        if let Some((_, end, previous)) = ranges.last_mut() {
+            if end.checked_add(1) == Some(port) && *previous == probes {
+                *end = port;
+                continue;
+            }
+        }
+        ranges.push((port, port, probes));
+    }
 
+    let mut generated_code = String::new();
+    for (index, payload) in payloads.iter().enumerate() {
+        writeln!(
+            generated_code,
+            "static PAYLOAD_{}: &[u8] = &{:?};",
+            index, payload
+        )
+        .unwrap();
+    }
     generated_code.push_str(
-        "static PARSED_DATA: Lazy<BTreeMap<Vec<u16>, Vec<Vec<u8>>>> = Lazy::new(generated_data);\n",
+        "/// Returns every distinct UDP probe for a port, borrowing static storage.\n\
+         /// Ports absent from the payload database return an empty slice.\n\
+         pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {\nmatch port {\n",
     );
-    generated_code
-        .push_str("pub fn get_parsed_data() -> &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
-    generated_code.push_str("    &PARSED_DATA\n");
-    generated_code.push_str("}\n");
+    for (start, end, probes) in ranges {
+        let probes = probes
+            .iter()
+            .map(|index| format!("PAYLOAD_{}", index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            generated_code,
+            "{}..={} => {{ static PROBES: &[&[u8]] = &[{}]; PROBES }},",
+            start, end, probes
+        )
+        .unwrap();
+    }
+    generated_code.push_str("_ => &[],\n}\n}\n");
 
     fs::write(dest_path, generated_code).unwrap();
 

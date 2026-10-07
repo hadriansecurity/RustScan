@@ -1,5 +1,5 @@
 //! Core functionality for actual scanning behaviour.
-use crate::generated::get_parsed_data;
+use crate::generated::payloads_for;
 use crate::port_strategy::PortStrategy;
 use crate::tui::println_safe;
 use log::debug;
@@ -12,16 +12,12 @@ use errors::{diagnostic_error, is_descriptor_exhaustion, ScanErrors};
 
 use colored::Colorize;
 use futures::stream::{FuturesUnordered, StreamExt};
-use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::task::Poll;
 use std::{
-    collections::HashMap,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr},
     num::NonZeroU8,
-    ops::Range,
-    sync::Arc,
     time::Duration,
 };
 use tokio::io::Interest;
@@ -57,59 +53,6 @@ fn filter_excluded_ports(mut ports: Vec<u16>, excluded: &[u16]) -> Vec<u16> {
     }
     ports.retain(|&port| excluded_bits[usize::from(port) / 64] & (1 << (port % 64)) == 0);
     ports
-}
-
-/// UDP payload lookup: port -> probe variants
-///
-/// `get_parsed_data()` returns a `&'static BTreeMap<...>`, so we can store
-/// references to the payload bytes without cloning them. Every port's
-/// variants are a range of one shared table, so building the lookup for
-/// some 33,000 ports allocates no list per port.
-#[doc(hidden)]
-#[derive(Default)]
-pub struct UdpPayloadLookup {
-    probes: Vec<&'static [u8]>,
-    ports: HashMap<u16, Range<usize>>,
-}
-
-impl UdpPayloadLookup {
-    pub fn get(&self, port: &u16) -> Option<&[&'static [u8]]> {
-        self.ports
-            .get(port)
-            .map(|range| &self.probes[range.clone()])
-    }
-
-    pub fn contains_key(&self, port: &u16) -> bool {
-        self.ports.contains_key(port)
-    }
-}
-
-#[doc(hidden)]
-pub fn build_udp_payload_lookup(
-    udp_map: &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
-) -> UdpPayloadLookup {
-    let mut lookup = UdpPayloadLookup::default();
-
-    for (ports, variants) in udp_map.iter() {
-        let start = lookup.probes.len();
-        lookup.probes.extend(variants.iter().map(Vec::as_slice));
-        let range = start..lookup.probes.len();
-        for &port in ports.iter() {
-            let Some(previous) = lookup.ports.insert(port, range.clone()) else {
-                continue;
-            };
-            let merged = lookup.probes.len();
-            for index in previous.chain(range.clone()) {
-                let probe = lookup.probes[index];
-                if !lookup.probes[merged..].contains(&probe) {
-                    lookup.probes.push(probe);
-                }
-            }
-            lookup.ports.insert(port, merged..lookup.probes.len());
-        }
-    }
-
-    lookup
 }
 
 /// The class for the scanner
@@ -253,15 +196,6 @@ impl Scanner {
         let mut errors =
             ScanErrors::new(log::log_enabled!(log::Level::Debug), self.ips.len() * 1000);
 
-        // Build UDP payload lookup once (only if we are scanning UDP).
-        // This avoids cloning a big map into every spawned future and turns
-        // payload selection from O(n) to O(1).
-        let udp_payloads: Option<Arc<UdpPayloadLookup>> = if self.udp {
-            Some(Arc::new(build_udp_payload_lookup(get_parsed_data())))
-        } else {
-            None
-        };
-
         debug!("Start scanning sockets. \nBatch size {}\nNumber of ip-s {}\nNumber of ports {}\nTargets all together {}\nInterval between ports {:?}",
             self.batch_size,
             self.ips.len(),
@@ -271,7 +205,7 @@ impl Scanner {
 
         if self.interval.is_zero() {
             let sockets = SocketIterator::new(&self.ips, &ports);
-            self.scan_sockets(sockets, &udp_payloads, &mut found_sockets, &mut errors)
+            self.scan_sockets(sockets, &mut found_sockets, &mut errors)
                 .await;
         } else {
             // Scan one port (on every address) at a time and wait `interval`
@@ -281,7 +215,7 @@ impl Scanner {
                     sleep(self.interval).await;
                 }
                 let sockets = SocketIterator::new(&self.ips, std::slice::from_ref(port));
-                self.scan_sockets(sockets, &udp_payloads, &mut found_sockets, &mut errors)
+                self.scan_sockets(sockets, &mut found_sockets, &mut errors)
                     .await;
             }
         }
@@ -305,7 +239,6 @@ impl Scanner {
     async fn scan_sockets(
         &self,
         mut sockets: SocketIterator<'_>,
-        udp_payloads: &Option<Arc<UdpPayloadLookup>>,
         found_sockets: &mut Vec<PortStatus>,
         errors: &mut ScanErrors,
     ) {
@@ -317,7 +250,7 @@ impl Scanner {
                 let mut started = false;
                 if ftrs.len() < self.batch_size {
                     if let Some(socket) = sockets.next() {
-                        ftrs.push(self.scan_socket(socket, udp_payloads.clone()));
+                        ftrs.push(self.scan_socket(socket));
                         started = true;
                         work += 1;
                     }
@@ -377,13 +310,11 @@ impl Scanner {
     /// ```
     ///
     /// Note: `self` must contain `self.ip`.
-    async fn scan_socket(
-        &self,
-        socket: SocketAddr,
-        udp_payloads: Option<Arc<UdpPayloadLookup>>,
-    ) -> io::Result<PortStatus> {
+    async fn scan_socket(&self, socket: SocketAddr) -> io::Result<PortStatus> {
         if self.udp {
-            return self.scan_udp_socket(socket, udp_payloads).await;
+            return self
+                .scan_udp_socket(socket, payloads_for(socket.port()))
+                .await;
         }
 
         let tries = self.tries.get();
@@ -429,14 +360,14 @@ impl Scanner {
     async fn scan_udp_socket(
         &self,
         socket: SocketAddr,
-        udp_payloads: Option<Arc<UdpPayloadLookup>>,
+        payloads: &[&[u8]],
     ) -> io::Result<PortStatus> {
         const EMPTY_PROBE: &[&[u8]] = &[b""];
-        let payloads: &[&[u8]] = udp_payloads
-            .as_ref()
-            .and_then(|m| m.get(&socket.port()))
-            .filter(|probes| !probes.is_empty())
-            .unwrap_or(EMPTY_PROBE);
+        let payloads = if payloads.is_empty() {
+            EMPTY_PROBE
+        } else {
+            payloads
+        };
 
         let udp_socket = Self::udp_bind(socket).inspect_err(|e| {
             debug!("Error binding UDP socket: {e:?}");
@@ -861,17 +792,13 @@ mod tests {
     /// decoding mangled it into a 28-byte probe that agents never answered.
     #[test]
     fn udp_snmp_probe_bytes_match_nmap() {
-        let variants = get_parsed_data()
-            .iter()
-            .find(|(ports, _)| ports.contains(&161))
-            .map(|(_, variants)| variants)
-            .expect("no UDP payload registered for port 161");
+        let variants = payloads_for(161);
         let expected: Vec<u8> = vec![
             0x30, 0x1f, 0x02, 0x01, 0x00, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa1,
             0x12, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x07, 0x30, 0x05,
             0x06, 0x01, 0x00, 0x05, 0x00,
         ];
-        assert!(variants.contains(&expected), "{:?}", variants);
+        assert!(variants.contains(&expected.as_slice()), "{:?}", variants);
     }
 
     /// The SSDP probe mixes `\xNN` escapes, `\"` escapes and literal text
@@ -879,10 +806,8 @@ mod tests {
     /// with no separators.
     #[test]
     fn udp_ssdp_probe_decodes_escapes_and_literal_text() {
-        let payload = get_parsed_data()
-            .iter()
-            .find(|(ports, _)| ports.contains(&1900))
-            .and_then(|(_, variants)| variants.last())
+        let payload = payloads_for(1900)
+            .last()
             .expect("no UDP payload registered for port 1900");
         let expected =
             b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 5\r\nST: ssdp:all\r\n\r\n"

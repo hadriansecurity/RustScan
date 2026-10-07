@@ -1,9 +1,8 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use rustscan::generated::get_parsed_data;
+use rustscan::generated::payloads_for;
 use rustscan::input::{Opts, PortRanges, ScanOrder};
 use rustscan::port_strategy::PortStrategy;
-use rustscan::scanner::{build_udp_payload_lookup, Scanner};
-use std::collections::BTreeMap;
+use rustscan::scanner::Scanner;
 use std::hint::black_box;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -33,21 +32,6 @@ fn bench_address_parsing() {
         ..Default::default()
     };
     let _ips = rustscan::address::parse_addresses(&opts);
-}
-
-// Replicates the old UDP payload selection behavior:
-// scan the whole UDP payload map and find the last payload whose port list contains `port`.
-fn old_payload_for_port(
-    udp_map: &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
-    port: u16,
-) -> &'static [u8] {
-    let mut payload: &'static [u8] = b"";
-    for (ports, variants) in udp_map.iter() {
-        if ports.contains(&port) {
-            payload = variants.last().map_or(b"", Vec::as_slice);
-        }
-    }
-    payload
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
@@ -107,26 +91,25 @@ fn criterion_benchmark(c: &mut Criterion) {
     }
     preparation.finish();
 
-    // UDP payload lookup micro-benchmark: compares the old linear scan of the
-    // payload map with the precomputed port -> payload lookup. No sockets.
-    let udp_map = get_parsed_data();
-    let lookup = build_udp_payload_lookup(udp_map);
-    let ports: Vec<u16> = (1..=4096).collect();
-
-    c.bench_function("udp payload lookup/old scan map 1..4096", |b| {
-        b.iter(|| {
-            for &p in ports.iter() {
-                let payload = old_payload_for_port(black_box(udp_map), black_box(p));
-                black_box(payload);
-            }
-        })
+    // No targets: measure UDP scan preparation without opening sockets.
+    let scanner = Scanner::new(
+        &[],
+        1,
+        Duration::from_millis(100),
+        1,
+        true,
+        PortStrategy::Manual(vec![53]),
+        true,
+        vec![],
+        true,
+    );
+    c.bench_function("udp scan preparation", |b| {
+        b.iter(|| black_box(runtime.block_on(black_box(&scanner).run())))
     });
-
-    c.bench_function("udp payload lookup/new hashmap 1..4096", |b| {
+    c.bench_function("udp payload lookup/static 1..4096", |b| {
         b.iter(|| {
-            for &p in ports.iter() {
-                let payload = lookup.get(&p).unwrap_or_default();
-                black_box(payload);
+            for port in 1..=4096 {
+                black_box(payloads_for(black_box(port)));
             }
         })
     });
