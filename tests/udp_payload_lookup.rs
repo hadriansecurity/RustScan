@@ -46,12 +46,11 @@ fn trailing_comments_are_not_part_of_the_payload() {
 }
 
 #[test]
-fn lookup_preserves_every_port_byte_and_variant_order_from_pr9() {
-    // This fixture was captured from the pre-optimization generated map in
-    // f6be53e, independently of the static lookup generator. Update it only
-    // when intentionally changing the vendored probes or their send order.
+fn lookup_matches_expected_probes_for_every_port() {
+    // The fixed reference is independent of the static lookup generator.
+    // Its header documents provenance and how to prepare intentional updates.
     let mut expected = HashMap::new();
-    for line in include_str!("fixtures/udp_payloads_pr9.txt").lines() {
+    for line in include_str!("fixtures/udp_payloads_expected.txt").lines() {
         if line.starts_with('#') || line.is_empty() {
             continue;
         }

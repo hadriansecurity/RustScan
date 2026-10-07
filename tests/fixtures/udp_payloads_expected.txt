@@ -1,5 +1,14 @@
-# Probe bytes and order from PR #9, f6be53ee5dbd717fc9d8a3682a71e3b339909d54.
-# Inclusive port range followed by each distinct probe in hex.
+# Expected UDP probe bytes and order.
+# Source: generated BTreeMap at f6be53ee5dbd717fc9d8a3682a71e3b339909d54.
+# Captured by reading the vec! literals in src/generated.rs after cargo build.
+# Expand records in sorted port-list-key order, preserve variant order within
+# each record, and deduplicate each port's payloads by byte content. Coalesce
+# adjacent ports only when their complete ordered probe lists are identical.
+# Format: inclusive port range followed by each distinct probe in hex.
+# For intentional database updates, use an independently reviewed reference
+# parser or the previous map builder with the new nmap-payloads file. Review
+# byte/order changes before replacing this fixture; do not dump payloads_for
+# from the generator under test, which would make the comparison circular.
 7-7 0d0a0d0a
 53-53 000010000000000000000000 7777010000010000000000000776657273696f6e0462696e640000100003
 67-67 010106000123456700000000ffffffff000000000000000000000000000e35d4d8510000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000063825363350108ff

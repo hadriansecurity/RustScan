@@ -55,8 +55,29 @@ pub fn main() {
         fp_map.insert(count, curr);
     }
 
+    // Count declarations independently of record collection and validate
+    // before deduplication, where identical records may legitimately merge.
+    let expected_records = data
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some("udp"))
+        .count();
+    assert_eq!(
+        fp_map.len(),
+        expected_records,
+        "nmap-payloads: lost UDP records while collecting entries"
+    );
     let pb_linenr = ports_v(&fp_map);
     let payb_linenr = payloads_v(&fp_map);
+    assert_eq!(
+        pb_linenr.values().filter(|ports| !ports.is_empty()).count(),
+        expected_records,
+        "nmap-payloads: a UDP record has no parsed ports"
+    );
+    assert_eq!(
+        payb_linenr.len(),
+        expected_records,
+        "nmap-payloads: a UDP record has no parsed payload"
+    );
     let map = port_payload_map(pb_linenr, payb_linenr);
 
     generate_code(map);
@@ -99,8 +120,8 @@ fn strip_comment(line: &str) -> &str {
 fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
     let dest_path = PathBuf::from("src/generated.rs");
 
-    // Keep the runtime lookup's BTreeMap traversal order, including ports
-    // appearing in several records, but resolve it once during the build.
+    // Per-port probe order follows sorted port-list keys, then file order
+    // within each key. Keep the first occurrence of duplicate payload bytes.
     let mut payloads: Vec<Vec<u8>> = Vec::new();
     let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
     for (port_list, variants) in port_payload_map {
