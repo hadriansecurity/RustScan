@@ -89,7 +89,6 @@ fn criterion_benchmark(c: &mut Criterion) {
             |b| b.iter(|| black_box(runtime.block_on(black_box(&scanner).run_with_status()))),
         );
     }
-    preparation.finish();
 
     // No targets: measure UDP scan preparation without opening sockets.
     let scanner = Scanner::new(
@@ -103,10 +102,12 @@ fn criterion_benchmark(c: &mut Criterion) {
         vec![],
         true,
     );
-    c.bench_function("udp scan preparation", |b| {
-        b.iter(|| black_box(runtime.block_on(black_box(&scanner).run())))
+    preparation.bench_function("udp scan preparation", |b| {
+        b.iter(|| black_box(runtime.block_on(black_box(&scanner).run_with_status())))
     });
-    c.bench_function("udp payload lookup/static 1..4096", |b| {
+    preparation.finish();
+
+    c.bench_function("udp payload lookup 1..4096", |b| {
         b.iter(|| {
             for port in 1..=4096 {
                 black_box(payloads_for(black_box(port)));

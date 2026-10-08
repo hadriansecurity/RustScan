@@ -55,29 +55,9 @@ pub fn main() {
         fp_map.insert(count, curr);
     }
 
-    // Count declarations independently of record collection and validate
-    // before deduplication, where identical records may legitimately merge.
-    let expected_records = data
-        .lines()
-        .filter(|line| line.split_whitespace().next() == Some("udp"))
-        .count();
-    assert_eq!(
-        fp_map.len(),
-        expected_records,
-        "nmap-payloads: lost UDP records while collecting entries"
-    );
     let pb_linenr = ports_v(&fp_map);
     let payb_linenr = payloads_v(&fp_map);
-    assert_eq!(
-        pb_linenr.values().filter(|ports| !ports.is_empty()).count(),
-        expected_records,
-        "nmap-payloads: a UDP record has no parsed ports"
-    );
-    assert_eq!(
-        payb_linenr.len(),
-        expected_records,
-        "nmap-payloads: a UDP record has no parsed payload"
-    );
+    validate_records(&data, &fp_map, &pb_linenr, &payb_linenr);
     let map = port_payload_map(pb_linenr, payb_linenr);
 
     generate_code(map);
@@ -112,16 +92,59 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Generates a file called Generated.rs and calls cargo fmt from the command line
+/// Checks that every UDP declaration has collected ports and a parsed payload.
+///
+/// Count before deduplication, where identical records may legitimately merge.
+///
+/// # Arguments
+///
+/// * `data` - The original payload file
+/// * `fp_map` - Collected records keyed by line number
+/// * `pb_linenr` - Parsed ports keyed by line number
+/// * `payb_linenr` - Parsed payloads keyed by line number
+fn validate_records(
+    data: &str,
+    fp_map: &BTreeMap<i32, String>,
+    pb_linenr: &BTreeMap<i32, Vec<u16>>,
+    payb_linenr: &BTreeMap<i32, Vec<u8>>,
+) {
+    let expected_records = data
+        .trim()
+        .lines()
+        .filter(|line| line.starts_with("udp"))
+        .count();
+    assert_eq!(
+        fp_map.len(),
+        expected_records,
+        "lost UDP records while collecting entries"
+    );
+    assert_eq!(
+        pb_linenr.values().filter(|ports| !ports.is_empty()).count(),
+        expected_records,
+        "a UDP record has no parsed ports"
+    );
+    assert_eq!(
+        payb_linenr.len(),
+        expected_records,
+        "a UDP record has no parsed payload"
+    );
+}
+
+/// Deduplicates payload bytes and indexes the ordered probes for each port.
+///
+/// Probe order follows sorted port-list keys, then file order within each key.
+/// Keep the first occurrence of duplicate payload bytes.
 ///
 /// # Arguments
 ///
 /// * `port_payload_map` - A BTreeMap mapping port lists to their payload variants
-fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
-    let dest_path = PathBuf::from("src/generated.rs");
-
-    // Per-port probe order follows sorted port-list keys, then file order
-    // within each key. Keep the first occurrence of duplicate payload bytes.
+///
+/// # Returns
+///
+/// Unique payloads and a BTreeMap mapping ports to ordered payload indices
+fn index_payloads(
+    port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
+) -> (Vec<Vec<u8>>, BTreeMap<u16, Vec<usize>>) {
     let mut payloads: Vec<Vec<u8>> = Vec::new();
     let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
     for (port_list, variants) in port_payload_map {
@@ -142,8 +165,19 @@ fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
         }
     }
 
-    // Coalesce adjacent ports with identical probes. This keeps the large
-    // RPC range compact without allocating a slot for every port at runtime.
+    (payloads, ports)
+}
+
+/// Coalesces adjacent ports with identical probes into inclusive ranges.
+///
+/// # Arguments
+///
+/// * `ports` - A BTreeMap mapping ports to ordered payload indices
+///
+/// # Returns
+///
+/// Inclusive start and end ports with the payload indices shared by each range
+fn coalesce_port_ranges(ports: BTreeMap<u16, Vec<usize>>) -> Vec<(u16, u16, Vec<usize>)> {
     let mut ranges: Vec<(u16, u16, Vec<usize>)> = Vec::new();
     for (port, probes) in ports {
         if let Some((_, end, previous)) = ranges.last_mut() {
@@ -155,34 +189,57 @@ fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
         ranges.push((port, port, probes));
     }
 
+    ranges
+}
+
+/// Writes the static UDP payload lookup to src/generated.rs and calls cargo fmt.
+///
+/// # Arguments
+///
+/// * `port_payload_map` - A BTreeMap mapping port lists to their payload variants
+fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
+    let dest_path = PathBuf::from("src/generated.rs");
+
+    let (payloads, ports) = index_payloads(port_payload_map);
+    let ranges = coalesce_port_ranges(ports);
+
     let mut generated_code = String::new();
     for (index, payload) in payloads.iter().enumerate() {
         writeln!(
             generated_code,
-            "static PAYLOAD_{}: &[u8] = &{:?};",
-            index, payload
+            "static PAYLOAD_{index}: &[u8] = &{payload:?};"
         )
         .unwrap();
     }
-    generated_code.push_str(
-        "/// Returns every distinct UDP probe for a port, borrowing static storage.\n\
-         /// Ports absent from the payload database return an empty slice.\n\
-         pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {\nmatch port {\n",
-    );
+    writeln!(
+        generated_code,
+        "/// Returns every distinct UDP probe for a port."
+    )
+    .unwrap();
+    writeln!(
+        generated_code,
+        "/// Ports absent from the payload database return an empty slice."
+    )
+    .unwrap();
+    writeln!(
+        generated_code,
+        "pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {{"
+    )
+    .unwrap();
+    writeln!(generated_code, "match port {{").unwrap();
     for (start, end, probes) in ranges {
         let probes = probes
             .iter()
-            .map(|index| format!("PAYLOAD_{}", index))
+            .map(|index| format!("PAYLOAD_{index}"))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
             generated_code,
-            "{}..={} => {{ static PROBES: &[&[u8]] = &[{}]; PROBES }},",
-            start, end, probes
+            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{probes}]; PROBES }},"
         )
         .unwrap();
     }
-    generated_code.push_str("_ => &[],\n}\n}\n");
+    writeln!(generated_code, "_ => &[],\n}}\n}}").unwrap();
 
     fs::write(dest_path, generated_code).unwrap();
 
