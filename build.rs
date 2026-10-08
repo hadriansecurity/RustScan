@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::fs::{self, File};
 
 use std::env;
@@ -56,6 +57,7 @@ pub fn main() {
 
     let pb_linenr = ports_v(&fp_map);
     let payb_linenr = payloads_v(&fp_map);
+    validate_records(&data, &fp_map, &pb_linenr, &payb_linenr);
     let map = port_payload_map(pb_linenr, payb_linenr);
 
     generate_code(map);
@@ -90,7 +92,107 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-/// Generates a file called Generated.rs and calls cargo fmt from the command line
+/// Checks that every UDP declaration has collected ports and a parsed payload.
+///
+/// Count before deduplication, where identical records may legitimately merge.
+///
+/// # Arguments
+///
+/// * `data` - The original payload file
+/// * `fp_map` - Collected records keyed by line number
+/// * `pb_linenr` - Parsed ports keyed by line number
+/// * `payb_linenr` - Parsed payloads keyed by line number
+fn validate_records(
+    data: &str,
+    fp_map: &BTreeMap<i32, String>,
+    pb_linenr: &BTreeMap<i32, Vec<u16>>,
+    payb_linenr: &BTreeMap<i32, Vec<u8>>,
+) {
+    let expected_records = data
+        .trim()
+        .lines()
+        .filter(|line| line.starts_with("udp"))
+        .count();
+    assert_eq!(
+        fp_map.len(),
+        expected_records,
+        "lost UDP records while collecting entries"
+    );
+    assert_eq!(
+        pb_linenr.values().filter(|ports| !ports.is_empty()).count(),
+        expected_records,
+        "a UDP record has no parsed ports"
+    );
+    assert_eq!(
+        payb_linenr.len(),
+        expected_records,
+        "a UDP record has no parsed payload"
+    );
+}
+
+/// Deduplicates payload bytes and indexes the ordered probes for each port.
+///
+/// Probe order follows sorted port-list keys, then file order within each key.
+/// Keep the first occurrence of duplicate payload bytes.
+///
+/// # Arguments
+///
+/// * `port_payload_map` - A BTreeMap mapping port lists to their payload variants
+///
+/// # Returns
+///
+/// Unique payloads and a BTreeMap mapping ports to ordered payload indices
+fn index_payloads(
+    port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>,
+) -> (Vec<Vec<u8>>, BTreeMap<u16, Vec<usize>>) {
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+    for (port_list, variants) in port_payload_map {
+        for payload in variants {
+            let index = match payloads.iter().position(|known| known == &payload) {
+                Some(index) => index,
+                None => {
+                    payloads.push(payload);
+                    payloads.len() - 1
+                }
+            };
+            for &port in &port_list {
+                let probes = ports.entry(port).or_default();
+                if !probes.contains(&index) {
+                    probes.push(index);
+                }
+            }
+        }
+    }
+
+    (payloads, ports)
+}
+
+/// Coalesces adjacent ports with identical probes into inclusive ranges.
+///
+/// # Arguments
+///
+/// * `ports` - A BTreeMap mapping ports to ordered payload indices
+///
+/// # Returns
+///
+/// Inclusive start and end ports with the payload indices shared by each range
+fn coalesce_port_ranges(ports: BTreeMap<u16, Vec<usize>>) -> Vec<(u16, u16, Vec<usize>)> {
+    let mut ranges: Vec<(u16, u16, Vec<usize>)> = Vec::new();
+    for (port, probes) in ports {
+        if let Some((_, end, previous)) = ranges.last_mut() {
+            if end.checked_add(1) == Some(port) && *previous == probes {
+                *end = port;
+                continue;
+            }
+        }
+        ranges.push((port, port, probes));
+    }
+
+    ranges
+}
+
+/// Writes the static UDP payload lookup to src/generated.rs and calls cargo fmt.
 ///
 /// # Arguments
 ///
@@ -98,47 +200,46 @@ fn strip_comment(line: &str) -> &str {
 fn generate_code(port_payload_map: BTreeMap<Vec<u16>, Vec<Vec<u8>>>) {
     let dest_path = PathBuf::from("src/generated.rs");
 
+    let (payloads, ports) = index_payloads(port_payload_map);
+    let ranges = coalesce_port_ranges(ports);
+
     let mut generated_code = String::new();
-    generated_code.push_str("use std::collections::BTreeMap;\n");
-    generated_code.push_str("use once_cell::sync::Lazy;\n\n");
-
-    generated_code.push_str("fn generated_data() -> BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
-    generated_code.push_str("    let mut map = BTreeMap::new();\n");
-
-    for (ports, payloads) in port_payload_map {
-        generated_code.push_str("    map.insert(vec![");
-        generated_code.push_str(
-            &ports
-                .iter()
-                .map(|&p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        generated_code.push_str("], vec![");
-        for payload in payloads {
-            generated_code.push_str("vec![");
-            generated_code.push_str(
-                &payload
-                    .iter()
-                    .map(|&p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
-            generated_code.push_str("],");
-        }
-        generated_code.push_str("]);\n");
+    for (index, payload) in payloads.iter().enumerate() {
+        writeln!(
+            generated_code,
+            "static PAYLOAD_{index}: &[u8] = &{payload:?};"
+        )
+        .unwrap();
     }
-
-    generated_code.push_str("    map\n");
-    generated_code.push_str("}\n\n");
-
-    generated_code.push_str(
-        "static PARSED_DATA: Lazy<BTreeMap<Vec<u16>, Vec<Vec<u8>>>> = Lazy::new(generated_data);\n",
-    );
-    generated_code
-        .push_str("pub fn get_parsed_data() -> &'static BTreeMap<Vec<u16>, Vec<Vec<u8>>> {\n");
-    generated_code.push_str("    &PARSED_DATA\n");
-    generated_code.push_str("}\n");
+    writeln!(
+        generated_code,
+        "/// Returns every distinct UDP probe for a port."
+    )
+    .unwrap();
+    writeln!(
+        generated_code,
+        "/// Ports absent from the payload database return an empty slice."
+    )
+    .unwrap();
+    writeln!(
+        generated_code,
+        "pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {{"
+    )
+    .unwrap();
+    writeln!(generated_code, "match port {{").unwrap();
+    for (start, end, probes) in ranges {
+        let probes = probes
+            .iter()
+            .map(|index| format!("PAYLOAD_{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            generated_code,
+            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{probes}]; PROBES }},"
+        )
+        .unwrap();
+    }
+    writeln!(generated_code, "_ => &[],\n}}\n}}").unwrap();
 
     fs::write(dest_path, generated_code).unwrap();
 

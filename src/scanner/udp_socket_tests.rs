@@ -35,13 +35,7 @@ async fn scan(
     target: SocketAddr,
     payloads: &[&'static [u8]],
 ) -> io::Result<PortStatus> {
-    let lookup = UdpPayloadLookup {
-        probes: payloads.to_vec(),
-        ports: HashMap::from([(target.port(), 0..payloads.len())]),
-    };
-    scanner
-        .scan_udp_socket(target, Some(Arc::new(lookup)))
-        .await
+    scanner.scan_udp_socket(target, payloads).await
 }
 
 async fn receive(server: &UdpSocket) -> (Vec<u8>, SocketAddr) {
