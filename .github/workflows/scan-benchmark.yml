@@ -78,7 +78,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: stable
-          # build.rs formats the generated payload table with rustfmt.
+          # Older comparison builds format their generated table with rustfmt.
           components: rustfmt
           # Caching is handled by Swatinem/rust-cache below.
           cache: false
