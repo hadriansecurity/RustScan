@@ -228,7 +228,8 @@ impl Scanner {
     }
 
     /// Scans every socket yielded by `sockets`, keeping at most `batch_size`
-    /// connection attempts in flight.
+    /// descriptors in flight. A UDP target holds one per probe variant; a
+    /// target that needs more than the whole batch runs on its own.
     ///
     /// Starts sockets and handles finished ones in rounds of at most
     /// [`WORK_PER_TURN`] of either, and lets the runtime poll for I/O and fire
@@ -245,14 +246,20 @@ impl Scanner {
         errors: &mut ScanErrors,
     ) {
         let mut ftrs = FuturesUnordered::new();
+        let mut descriptors = 0;
+        let mut next = sockets.next();
 
         loop {
             let mut work = 0;
             while work < WORK_PER_TURN {
                 let mut started = false;
-                if ftrs.len() < self.batch_size {
-                    if let Some(socket) = sockets.next() {
-                        ftrs.push(self.scan_socket(socket));
+                if let Some(socket) = next {
+                    let needed = self.descriptors_for(socket);
+                    if ftrs.is_empty() || descriptors + needed <= self.batch_size {
+                        let scan = self.scan_socket(socket);
+                        ftrs.push(async move { (needed, scan.await) });
+                        descriptors += needed;
+                        next = sockets.next();
                         started = true;
                         work += 1;
                     }
@@ -260,7 +267,8 @@ impl Scanner {
 
                 // Poll once without waiting; this starts the new socket.
                 match poll_fn(|cx| Poll::Ready(ftrs.poll_next_unpin(cx))).await {
-                    Poll::Ready(Some(result)) => {
+                    Poll::Ready(Some((released, result))) => {
+                        descriptors -= released;
                         self.record(result, found_sockets, errors);
                         work += 1;
                     }
@@ -278,10 +286,21 @@ impl Scanner {
                 // The batch is full (or complete) and every socket in it is
                 // waiting on the network.
                 match ftrs.next().await {
-                    Some(result) => self.record(result, found_sockets, errors),
+                    Some((released, result)) => {
+                        descriptors -= released;
+                        self.record(result, found_sockets, errors);
+                    }
                     None => return,
                 }
             }
+        }
+    }
+
+    fn descriptors_for(&self, socket: SocketAddr) -> usize {
+        if self.udp {
+            payloads_for(socket.port()).len().max(1)
+        } else {
+            1
         }
     }
 
@@ -388,6 +407,7 @@ impl Scanner {
             })
             .collect::<io::Result<Vec<_>>>()
             .inspect_err(|e| {
+                assert!(!is_descriptor_exhaustion(e), "Too many open files. Please reduce batch size. The default is 5000. Try -b 2500.");
                 debug!("Error binding UDP socket: {e:?}");
             })?;
         let mut buf = [0u8; 1024];
@@ -732,6 +752,18 @@ mod tests {
 
             assert!(runtime.block_on(scanner.run_with_status()).is_empty());
         }
+    }
+
+    #[test]
+    fn udp_targets_count_one_descriptor_per_probe_variant() {
+        let tcp = test_scanner();
+        let mut udp = test_scanner();
+        udp.udp = true;
+        let target = |port| SocketAddr::from(([127, 0, 0, 1], port));
+
+        assert_eq!(tcp.descriptors_for(target(161)), 1);
+        assert_eq!(udp.descriptors_for(target(161)), payloads_for(161).len());
+        assert_eq!(udp.descriptors_for(target(1)), 1, "the empty datagram");
     }
 
     #[test]

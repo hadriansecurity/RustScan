@@ -91,3 +91,21 @@ fn probe_names_follow_the_nmap_database() {
     assert_eq!(probe_names_for(161), ["SNMPv1public", "SNMPv3GetRequest"]);
     assert!(probe_names_for(1).is_empty());
 }
+
+#[test]
+fn probes_sharing_bytes_keep_the_name_configured_for_the_port() {
+    // GPRS_GTPv2prime sends the same bytes but is configured for 3386 only.
+    for port in [2123, 2152] {
+        assert!(
+            probe_names_for(port).contains(&"GPRS_GTPv2"),
+            "port {}",
+            port
+        );
+        assert!(
+            !probe_names_for(port).contains(&"GPRS_GTPv2prime"),
+            "port {}",
+            port
+        );
+    }
+    assert!(probe_names_for(3386).contains(&"GPRS_GTPv2prime"));
+}

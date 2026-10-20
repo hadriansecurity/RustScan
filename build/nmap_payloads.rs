@@ -1,12 +1,15 @@
 use std::{collections::BTreeMap, fmt::Write};
 
+/// Payload indices with the probe name each one has on a port.
+type Variants = Vec<(usize, String)>;
+
 pub fn generate(entries: Vec<Entry>) -> String {
     // Resolve overlaps and share payloads at build time. Even a one-port scan
     // can then borrow static probes without building a 33,000-entry heap map.
     let mut payloads = Vec::new();
-    // Identical bytes keep the name of the first probe that sent them.
-    let mut names = Vec::new();
-    let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+    // Bytes are shared across ports, but names are chosen per port: probes
+    // with identical bytes can be configured for different ports.
+    let mut ports: BTreeMap<u16, Variants> = BTreeMap::new();
     for entry in entries {
         let index = match payloads
             .iter()
@@ -15,21 +18,20 @@ pub fn generate(entries: Vec<Entry>) -> String {
             Some(index) => index,
             None => {
                 payloads.push(entry.payload);
-                names.push(entry.name);
                 payloads.len() - 1
             }
         };
         for port in entry.ports {
             let variants = ports.entry(port).or_default();
-            if !variants.contains(&index) {
-                variants.push(index);
+            if !variants.iter().any(|(known, _)| *known == index) {
+                variants.push((index, entry.name.clone()));
             }
         }
     }
 
     // Merge only adjacent ports with identical variant lists. Overlapping input
     // ranges must retain their combined probes rather than shadowing each other.
-    let mut ranges: Vec<(u16, u16, Vec<usize>)> = Vec::new();
+    let mut ranges: Vec<(u16, u16, Variants)> = Vec::new();
     for (port, variants) in ports {
         if let Some((_, end, previous)) = ranges.last_mut() {
             if end.checked_add(1) == Some(port) && *previous == variants {
@@ -48,7 +50,7 @@ pub fn generate(entries: Vec<Entry>) -> String {
     for (start, end, variants) in &ranges {
         let variants = variants
             .iter()
-            .map(|index| format!("PAYLOAD_{index}"))
+            .map(|(index, _)| format!("PAYLOAD_{index}"))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
@@ -64,7 +66,7 @@ pub fn generate(entries: Vec<Entry>) -> String {
     for (start, end, variants) in &ranges {
         let variants = variants
             .iter()
-            .map(|&index| format!("{:?}", names[index]))
+            .map(|(_, name)| format!("{name:?}"))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
