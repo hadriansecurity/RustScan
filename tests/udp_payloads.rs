@@ -32,6 +32,7 @@ ports 0,53",
     assert_eq!(entries[0].payload, b"a#b|\0\n\r\t\\");
     assert_eq!(entries[1].ports, [0, 53]);
     assert_eq!(entries[1].payload, b"final");
+    assert_eq!([&entries[0].name, &entries[1].name], ["First", "Last"]);
 }
 
 #[test]

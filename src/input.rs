@@ -230,6 +230,12 @@ pub struct Opts {
     #[arg(long)]
     pub closed: bool,
 
+    /// In greppable output, append the name of the Nmap probe that drew each
+    /// UDP reply, as in 53:DNSStatusRequest. Ports that only answered the
+    /// empty datagram are listed without a name.
+    #[arg(long)]
+    pub probe_names: bool,
+
     /// Milliseconds to wait after scanning a port (on every address) before
     /// scanning the next one, for slow, low-noise scans. 0 disables the delay.
     #[arg(long, default_value = "0", value_name = "MS")]
@@ -323,8 +329,20 @@ impl Opts {
         }
 
         merge_required!(
-            addresses, greppable, accessible, batch_size, timeout, tries, scan_order, scripts,
-            command, udp, no_banner, closed, interval
+            addresses,
+            greppable,
+            accessible,
+            batch_size,
+            timeout,
+            tries,
+            scan_order,
+            scripts,
+            command,
+            udp,
+            no_banner,
+            closed,
+            probe_names,
+            interval
         );
     }
 
@@ -372,6 +390,7 @@ impl Default for Opts {
             exclude_addresses: None,
             udp: false,
             closed: false,
+            probe_names: false,
             interval: 0,
             cli_args: HashSet::new(),
         }
@@ -402,6 +421,7 @@ pub struct Config {
     udp: Option<bool>,
     no_banner: Option<bool>,
     closed: Option<bool>,
+    probe_names: Option<bool>,
     interval: Option<u64>,
 }
 
@@ -421,6 +441,7 @@ impl Config {
     /// exclude_ports = [8080, 9090, 80]
     /// udp = false
     /// closed = false
+    /// probe_names = false
     /// interval = 0
     ///
     pub fn read(custom_config_path: Option<PathBuf>) -> Self {
@@ -521,6 +542,7 @@ mod tests {
                 udp: Some(false),
                 no_banner: None,
                 closed: Some(false),
+                probe_names: Some(false),
                 interval: None,
             }
         }

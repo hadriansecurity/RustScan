@@ -12,7 +12,7 @@ use rustscan::{detail, funny_opening, output, warning};
 
 use colorful::{Color, Colorful};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::string::ToString;
 use std::time::Duration;
 
@@ -119,10 +119,16 @@ fn main() {
 
     let mut ports_per_ip: HashMap<IpAddr, Vec<u16>> = HashMap::new();
     let mut closed_ports_per_ip: HashMap<IpAddr, Vec<u16>> = HashMap::new();
+    let mut probe_names: HashMap<SocketAddr, &str> = HashMap::new();
 
     for status in scan_result {
         let (map, socket) = match status {
-            PortStatus::Open(socket) => (&mut ports_per_ip, socket),
+            PortStatus::Open(socket, probe) => {
+                if let Some(probe) = probe {
+                    probe_names.insert(socket, probe);
+                }
+                (&mut ports_per_ip, socket)
+            }
             PortStatus::Closed(socket) => (&mut closed_ports_per_ip, socket),
         };
         map.entry(socket.ip()).or_default().push(socket.port());
@@ -154,6 +160,18 @@ fn main() {
 
         // if option scripts is none, no script will be spawned
         if opts.greppable || opts.scripts == ScriptsRequired::None {
+            let ports_str = if opts.probe_names {
+                ports
+                    .iter()
+                    .map(|&port| match probe_names.get(&SocketAddr::new(*ip, port)) {
+                        Some(probe) => format!("{port}:{probe}"),
+                        None => port.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            } else {
+                ports_str
+            };
             println_safe(format_args!("{ip} -> [{ports_str}]"));
             continue;
         }

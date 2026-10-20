@@ -1,10 +1,19 @@
 use std::{collections::BTreeMap, fmt::Write};
 
+/// A probe sent to a port: the index of its shared payload bytes, and its name.
+#[derive(PartialEq)]
+struct PortProbe {
+    payload: usize,
+    name: String,
+}
+
 pub fn generate(entries: Vec<Entry>) -> String {
     // Resolve overlaps and share payloads at build time. Even a one-port scan
     // can then borrow static probes without building a 33,000-entry heap map.
     let mut payloads = Vec::new();
-    let mut ports: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+    // Bytes are shared across ports, but names are chosen per port: probes
+    // with identical bytes can be configured for different ports.
+    let mut ports: BTreeMap<u16, Vec<PortProbe>> = BTreeMap::new();
     for entry in entries {
         let index = match payloads
             .iter()
@@ -17,24 +26,27 @@ pub fn generate(entries: Vec<Entry>) -> String {
             }
         };
         for port in entry.ports {
-            let variants = ports.entry(port).or_default();
-            if !variants.contains(&index) {
-                variants.push(index);
+            let probes = ports.entry(port).or_default();
+            if !probes.iter().any(|probe| probe.payload == index) {
+                probes.push(PortProbe {
+                    payload: index,
+                    name: entry.name.clone(),
+                });
             }
         }
     }
 
-    // Merge only adjacent ports with identical variant lists. Overlapping input
+    // Merge only adjacent ports with identical probe lists. Overlapping input
     // ranges must retain their combined probes rather than shadowing each other.
-    let mut ranges: Vec<(u16, u16, Vec<usize>)> = Vec::new();
-    for (port, variants) in ports {
+    let mut ranges: Vec<(u16, u16, Vec<PortProbe>)> = Vec::new();
+    for (port, probes) in ports {
         if let Some((_, end, previous)) = ranges.last_mut() {
-            if end.checked_add(1) == Some(port) && *previous == variants {
+            if end.checked_add(1) == Some(port) && *previous == probes {
                 *end = port;
                 continue;
             }
         }
-        ranges.push((port, port, variants));
+        ranges.push((port, port, probes));
     }
 
     let mut code = String::new();
@@ -42,15 +54,31 @@ pub fn generate(entries: Vec<Entry>) -> String {
         writeln!(code, "static PAYLOAD_{index}: &[u8] = &{payload:?};").unwrap();
     }
     code.push_str("pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {\nmatch port {\n");
-    for (start, end, variants) in ranges {
-        let variants = variants
+    for (start, end, probes) in &ranges {
+        let payloads = probes
             .iter()
-            .map(|index| format!("PAYLOAD_{index}"))
+            .map(|probe| format!("PAYLOAD_{}", probe.payload))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
             code,
-            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{variants}]; PROBES }},"
+            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{payloads}]; PROBES }},"
+        )
+        .unwrap();
+    }
+    code.push_str("_ => &[],\n}\n}\n");
+
+    // Index-aligned with `payloads_for`.
+    code.push_str("pub fn probe_names_for(port: u16) -> &'static [&'static str] {\nmatch port {\n");
+    for (start, end, probes) in &ranges {
+        let names = probes
+            .iter()
+            .map(|probe| format!("{:?}", probe.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            code,
+            "{start}..={end} => {{ static NAMES: &[&str] = &[{names}]; NAMES }},"
         )
         .unwrap();
     }
@@ -60,6 +88,7 @@ pub fn generate(entries: Vec<Entry>) -> String {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Entry {
+    pub name: String,
     pub ports: Vec<u16>,
     pub payload: Vec<u8>,
 }
@@ -89,7 +118,7 @@ pub fn parse_service_probes(input: &str) -> Result<Vec<Entry>, String> {
                 if protocol != "UDP" {
                     return Err(error("expected TCP or UDP probe"));
                 }
-                let (_, quoted) = rest
+                let (name, quoted) = rest
                     .trim_start()
                     .split_once(char::is_whitespace)
                     .ok_or_else(|| error("expected probe name and q-delimited payload"))?;
@@ -112,6 +141,7 @@ pub fn parse_service_probes(input: &str) -> Result<Vec<Entry>, String> {
                     .any(|flag| flag.starts_with("no-payload"))
                 {
                     current = Some(Entry {
+                        name: name.to_owned(),
                         ports: Vec::new(),
                         payload,
                     });

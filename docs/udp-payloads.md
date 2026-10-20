@@ -35,11 +35,20 @@ only destination that loses a specific probe and now receives an empty datagram,
 as it does with this Nmap pin. No local exception is retained. SQL Browser's
 `no-payload` exclusion is also preserved.
 
+## Probe names
+
+With `--udp --greppable --probe-names`, each open port is followed by the name
+of the Nmap probe whose reply opened it, for example
+`192.0.2.1 -> [53:DNSStatusRequest,161:SNMPv1public,40000]`. A port that only
+answered the empty datagram has no name. Byte-identical probes sharing a port
+keep the first probe's name. Without the flag the output is unchanged.
+
 ## Packet budget
 
 For a target port, an attempt sends each distinct variant once, or one empty
-UDP datagram when no variant exists. There is one timeout per attempt, and the
-socket stays alive across retries. Successful replies or explicit rejection
+UDP datagram when no variant exists. Each variant goes out from its own source
+port, so a reply identifies the probe that drew it. There is one timeout per
+attempt, and the sockets stay alive across retries. Successful replies or explicit rejection
 can end the scan early.
 
 For ports **1–65535**, per target IP:

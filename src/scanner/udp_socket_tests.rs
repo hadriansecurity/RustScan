@@ -35,7 +35,7 @@ async fn scan(
     target: SocketAddr,
     payloads: &[&'static [u8]],
 ) -> io::Result<PortStatus> {
-    scanner.scan_udp_socket(target, payloads).await
+    scanner.scan_udp_socket(target, payloads, &[]).await
 }
 
 async fn receive(server: &UdpSocket) -> (Vec<u8>, SocketAddr) {
@@ -49,27 +49,36 @@ async fn receive(server: &UdpSocket) -> (Vec<u8>, SocketAddr) {
 
 #[test]
 #[ignore = "opens sockets; run by the UDP regression workflow"]
-fn a_reply_to_any_variant_marks_the_port_open() {
+fn a_reply_names_the_variant_that_drew_it() {
     block_on(async {
         for address in ["127.0.0.1:0", "[::1]:0"] {
             for answered in 0..4 {
                 let server = UdpSocket::bind(address).await.unwrap();
                 let target = server.local_addr().unwrap();
                 let payloads: &[&[u8]] = &[b"first", b"second", b"third", b"fourth"];
+                let names = &["First", "Second", "Third", "Fourth"];
                 let responder = spawn(async move {
                     let mut peers = Vec::new();
-                    for (index, expected) in payloads.iter().enumerate() {
+                    for _ in payloads {
                         let (payload, peer) = receive(&server).await;
-                        assert_eq!(payload, *expected);
+                        let index = payloads.iter().position(|p| *p == payload).unwrap();
                         peers.push(peer);
                         if index == answered {
                             server.send_to(&[], peer).await.unwrap();
                         }
                     }
-                    assert!(peers.iter().all(|peer| *peer == peers[0]));
+                    peers.sort();
+                    peers.dedup();
+                    assert_eq!(peers.len(), payloads.len(), "one source port per variant");
                 });
-                let status = scan(&udp_scanner(Duration::from_secs(2), 2), target, payloads).await;
-                assert!(matches!(status, Ok(PortStatus::Open(_))), "{:?}", status);
+                let status = udp_scanner(Duration::from_secs(2), 2)
+                    .scan_udp_socket(target, payloads, names)
+                    .await;
+                assert!(
+                    matches!(status, Ok(PortStatus::Open(_, Some(name))) if name == names[answered]),
+                    "{:?}",
+                    status
+                );
                 responder.await.unwrap();
             }
         }
@@ -95,7 +104,11 @@ fn the_last_variant_gets_the_whole_response_window() {
         });
         let payloads: &[&[u8]] = &[b"first", b"second", b"third", b"fourth"];
         let status = scan(&udp_scanner(Duration::from_secs(2), 1), target, payloads).await;
-        assert!(matches!(status, Ok(PortStatus::Open(_))), "{:?}", status);
+        assert!(
+            matches!(status, Ok(PortStatus::Open(_, None))),
+            "{:?}",
+            status
+        );
         responder.await.unwrap();
     });
 }
@@ -116,7 +129,11 @@ fn a_late_reply_to_the_first_attempt_still_counts() {
             server.send_to(b"late", first).await.unwrap();
         });
         let status = scan(&udp_scanner(Duration::from_secs(1), 2), target, &[b"probe"]).await;
-        assert!(matches!(status, Ok(PortStatus::Open(_))), "{:?}", status);
+        assert!(
+            matches!(status, Ok(PortStatus::Open(_, None))),
+            "{:?}",
+            status
+        );
         responder.await.unwrap();
     });
 }
@@ -153,9 +170,12 @@ fn silent_ports_send_each_variant_once_per_attempt() {
             }
         }
         assert_eq!(packets.len(), payloads.len() * 2);
-        for (index, (payload, peer)) in packets.iter().enumerate() {
-            assert_eq!(payload, payloads[index % payloads.len()]);
-            assert_eq!(*peer, packets[0].1);
+        let (first, retry) = packets.split_at(payloads.len());
+        for (index, ((payload, peer), (retried, retry_peer))) in first.iter().zip(retry).enumerate()
+        {
+            assert_eq!(payload, payloads[index]);
+            assert_eq!(retried, payloads[index]);
+            assert_eq!(peer, retry_peer, "retries must keep the source port");
         }
     });
 }
@@ -173,7 +193,11 @@ fn ports_without_a_payload_get_one_empty_datagram() {
                 server.send_to(b"response", peer).await.unwrap();
             });
             let status = scan(&udp_scanner(Duration::from_secs(2), 1), target, payloads).await;
-            assert!(matches!(status, Ok(PortStatus::Open(_))), "{:?}", status);
+            assert!(
+                matches!(status, Ok(PortStatus::Open(_, None))),
+                "{:?}",
+                status
+            );
             responder.await.unwrap();
         }
     });
