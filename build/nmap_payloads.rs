@@ -1,7 +1,11 @@
 use std::{collections::BTreeMap, fmt::Write};
 
-/// Payload indices with the probe name each one has on a port.
-type Variants = Vec<(usize, String)>;
+/// A probe sent to a port: the index of its shared payload bytes, and its name.
+#[derive(PartialEq)]
+struct PortProbe {
+    payload: usize,
+    name: String,
+}
 
 pub fn generate(entries: Vec<Entry>) -> String {
     // Resolve overlaps and share payloads at build time. Even a one-port scan
@@ -9,7 +13,7 @@ pub fn generate(entries: Vec<Entry>) -> String {
     let mut payloads = Vec::new();
     // Bytes are shared across ports, but names are chosen per port: probes
     // with identical bytes can be configured for different ports.
-    let mut ports: BTreeMap<u16, Variants> = BTreeMap::new();
+    let mut ports: BTreeMap<u16, Vec<PortProbe>> = BTreeMap::new();
     for entry in entries {
         let index = match payloads
             .iter()
@@ -22,24 +26,27 @@ pub fn generate(entries: Vec<Entry>) -> String {
             }
         };
         for port in entry.ports {
-            let variants = ports.entry(port).or_default();
-            if !variants.iter().any(|(known, _)| *known == index) {
-                variants.push((index, entry.name.clone()));
+            let probes = ports.entry(port).or_default();
+            if !probes.iter().any(|probe| probe.payload == index) {
+                probes.push(PortProbe {
+                    payload: index,
+                    name: entry.name.clone(),
+                });
             }
         }
     }
 
-    // Merge only adjacent ports with identical variant lists. Overlapping input
+    // Merge only adjacent ports with identical probe lists. Overlapping input
     // ranges must retain their combined probes rather than shadowing each other.
-    let mut ranges: Vec<(u16, u16, Variants)> = Vec::new();
-    for (port, variants) in ports {
+    let mut ranges: Vec<(u16, u16, Vec<PortProbe>)> = Vec::new();
+    for (port, probes) in ports {
         if let Some((_, end, previous)) = ranges.last_mut() {
-            if end.checked_add(1) == Some(port) && *previous == variants {
+            if end.checked_add(1) == Some(port) && *previous == probes {
                 *end = port;
                 continue;
             }
         }
-        ranges.push((port, port, variants));
+        ranges.push((port, port, probes));
     }
 
     let mut code = String::new();
@@ -47,15 +54,15 @@ pub fn generate(entries: Vec<Entry>) -> String {
         writeln!(code, "static PAYLOAD_{index}: &[u8] = &{payload:?};").unwrap();
     }
     code.push_str("pub fn payloads_for(port: u16) -> &'static [&'static [u8]] {\nmatch port {\n");
-    for (start, end, variants) in &ranges {
-        let variants = variants
+    for (start, end, probes) in &ranges {
+        let payloads = probes
             .iter()
-            .map(|(index, _)| format!("PAYLOAD_{index}"))
+            .map(|probe| format!("PAYLOAD_{}", probe.payload))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
             code,
-            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{variants}]; PROBES }},"
+            "{start}..={end} => {{ static PROBES: &[&[u8]] = &[{payloads}]; PROBES }},"
         )
         .unwrap();
     }
@@ -63,15 +70,15 @@ pub fn generate(entries: Vec<Entry>) -> String {
 
     // Index-aligned with `payloads_for`.
     code.push_str("pub fn probe_names_for(port: u16) -> &'static [&'static str] {\nmatch port {\n");
-    for (start, end, variants) in &ranges {
-        let variants = variants
+    for (start, end, probes) in &ranges {
+        let names = probes
             .iter()
-            .map(|(_, name)| format!("{name:?}"))
+            .map(|probe| format!("{:?}", probe.name))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
             code,
-            "{start}..={end} => {{ static NAMES: &[&str] = &[{variants}]; NAMES }},"
+            "{start}..={end} => {{ static NAMES: &[&str] = &[{names}]; NAMES }},"
         )
         .unwrap();
     }
