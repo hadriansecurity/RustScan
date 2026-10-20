@@ -1,4 +1,4 @@
-use rustscan::generated::payloads_for;
+use rustscan::generated::{payloads_for, probe_names_for};
 
 #[test]
 fn udp_payload_lookup_contains_common_udp_ports() {
@@ -72,4 +72,22 @@ fn static_storage_is_reused_across_lookups_and_overlapping_records() {
 fn ports_without_a_payload_return_no_probes() {
     assert!(payloads_for(0).is_empty());
     assert!(payloads_for(1).is_empty());
+}
+
+#[test]
+fn every_probe_variant_has_a_name() {
+    for port in 0..=u16::MAX {
+        assert_eq!(
+            probe_names_for(port).len(),
+            payloads_for(port).len(),
+            "port {}",
+            port
+        );
+    }
+}
+
+#[test]
+fn probe_names_follow_the_nmap_database() {
+    assert_eq!(probe_names_for(161), ["SNMPv1public", "SNMPv3GetRequest"]);
+    assert!(probe_names_for(1).is_empty());
 }
