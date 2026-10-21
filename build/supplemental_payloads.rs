@@ -50,8 +50,8 @@ static MGCP_AUDIT_ENDPOINT: &[u8] = b"AUEP 9 * MGCP 1.0\r\n\r\n";
 static OMRON_FINS_CONTROLLER_DATA_READ: &[u8] =
     b"\x80\x00\x02\x00\x00\x00\x00\x63\x00\xef\x05\x01\x00";
 static PFCP_HEARTBEAT: &[u8] = b"\x20\x01\x00\x0c\x00\x00\x01\x00\x00\x60\x00\x04\x00\x00\x00\x01";
-// GTP' Echo Request as fingerprintx sends it: an 8-byte GTPv1-style header.
-static GTP_PRIME_ECHO: &[u8] = b"\x20\x01\x00\x00\x00\x00\x00\x00";
+// GTP' v1 Echo Request with the 6-octet header (TS 32.295 section 6.1).
+static GTP_PRIME_ECHO: &[u8] = b"\x2e\x01\x00\x00\x00\x00";
 
 // fingerprintx's IKEv2 IKE_SA_INIT (RFC 7296): AES-CBC, SHA2/SHA1, DH group 14.
 // Any value in [2, p-2] is a valid group 14 public key, so a fixed fill works.

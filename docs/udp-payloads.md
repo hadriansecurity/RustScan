@@ -65,7 +65,7 @@ IDs.
 | 2427, 2727 | MGCP | `AUEP 9 * MGCP 1.0` (audit endpoint) |
 | 500, 4500 | IKEv2 | IKE_SA_INIT (AES-CBC, SHA2/SHA1, DH group 14); Non-ESP Marker on 4500 |
 | 2944, 2945 | Megaco/H.248 | Text-mode ServiceChange (Restart, cold boot) |
-| 3386 | GTP′ | Echo Request with an 8-byte GTPv1-style header |
+| 3386 | GTP′ | v1 Echo Request with the 6-octet header (TS 32.295) |
 | 3671 | KNXnet/IP | Search Request with a NAT HPAI |
 | 4569 | IAX2 | POKE control frame |
 | 5783 | LwM2M bootstrap | Nmap's CoAP `GET /.well-known/core` from 5683 |

@@ -73,7 +73,7 @@ PROBES = {
     2427: [b"AUEP 9 * MGCP 1.0\r\n\r\n"],
     2727: [b"AUEP 9 * MGCP 1.0\r\n\r\n"],
     2944: [MEGACO],
-    3386: [bytes.fromhex("2001 0000 00000000")],
+    3386: [bytes.fromhex("2e01 0000 0000")],
     2945: [MEGACO],
     3671: [bytes.fromhex("0610 0201 000e 0801 00000000 0000")],
     4569: [bytes.fromhex("8000 0000 00000000 00 00 06 1e")],

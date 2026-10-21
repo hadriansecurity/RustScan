@@ -357,5 +357,5 @@ fn ikev2_sa_init_follows_ikev1_and_is_framed_only_on_natt() {
 fn gtp_prime_echo_follows_the_nmap_variant() {
     let payloads = payloads_for(3386);
     assert_eq!(payloads.len(), 2);
-    assert_eq!(payloads[1], b"\x20\x01\x00\x00\x00\x00\x00\x00");
+    assert_eq!(payloads[1], b"\x2e\x01\x00\x00\x00\x00");
 }
