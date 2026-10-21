@@ -50,6 +50,45 @@ static MGCP_AUDIT_ENDPOINT: &[u8] = b"AUEP 9 * MGCP 1.0\r\n\r\n";
 static OMRON_FINS_CONTROLLER_DATA_READ: &[u8] =
     b"\x80\x00\x02\x00\x00\x00\x00\x63\x00\xef\x05\x01\x00";
 static PFCP_HEARTBEAT: &[u8] = b"\x20\x01\x00\x0c\x00\x00\x01\x00\x00\x60\x00\x04\x00\x00\x00\x01";
+// GTP' Echo Request as fingerprintx sends it: an 8-byte GTPv1-style header.
+static GTP_PRIME_ECHO: &[u8] = b"\x20\x01\x00\x00\x00\x00\x00\x00";
+
+// fingerprintx's IKEv2 IKE_SA_INIT (RFC 7296): AES-CBC, SHA2/SHA1, DH group 14.
+// Any value in [2, p-2] is a valid group 14 public key, so a fixed fill works.
+const IKEV2_SA_INIT_LEN: usize = 420;
+const fn ikev2_sa_init<const N: usize>() -> [u8; N] {
+    let header = *b"rustscan\
+    \x00\x00\x00\x00\x00\x00\x00\x00\x21\x20\x22\x08\x00\x00\x00\x00\
+    \x00\x00\x01\xa4\x22\x00\x00\x5c\x02\x00\x00\x2c\x01\x01\x00\x04\
+    \x03\x00\x00\x0c\x01\x00\x00\x0c\x80\x0e\x01\x00\x03\x00\x00\x08\
+    \x03\x00\x00\x0c\x03\x00\x00\x08\x02\x00\x00\x05\x00\x00\x00\x08\
+    \x04\x00\x00\x0e\x00\x00\x00\x2c\x02\x01\x00\x04\x03\x00\x00\x0c\
+    \x01\x00\x00\x0c\x80\x0e\x00\x80\x03\x00\x00\x08\x03\x00\x00\x02\
+    \x03\x00\x00\x08\x02\x00\x00\x02\x00\x00\x00\x08\x04\x00\x00\x0e\
+    \x28\x00\x01\x08\x00\x0e\x00\x00";
+    let nonce_header = *b"\x00\x00\x00\x24";
+    // Bytes before the message: the Non-ESP Marker on UDP/4500, else none.
+    let start = N - IKEV2_SA_INIT_LEN;
+    let mut packet = [0; N];
+    let key_exchange_end = header.len() + 256;
+    let mut index = 0;
+    while index < IKEV2_SA_INIT_LEN {
+        packet[start + index] = if index < header.len() {
+            header[index]
+        } else if index < key_exchange_end {
+            0x5a
+        } else if index < key_exchange_end + nonce_header.len() {
+            nonce_header[index - key_exchange_end]
+        } else {
+            0xa5
+        };
+        index += 1;
+    }
+    packet
+}
+
+static IKEV2_SA_INIT: [u8; IKEV2_SA_INIT_LEN] = ikev2_sa_init();
+static IKEV2_SA_INIT_NAT_T: [u8; IKEV2_SA_INIT_LEN + 4] = ikev2_sa_init();
 
 // The six ZMap files are unmodified. Provenance and hashes: probes/zmap/README.md.
 // Append after Nmap so existing variants retain their ordering. SQL Browser
@@ -57,6 +96,7 @@ static PFCP_HEARTBEAT: &[u8] = b"\x20\x01\x00\x0c\x00\x00\x01\x00\x00\x60\x00\x0
 pub static PROBES: &[(u16, &[u8])] = &[
     (19, include_bytes!("../probes/zmap/chargen_19.pkt")),
     (443, &QUIC),
+    (500, &IKEV2_SA_INIT),
     (2362, include_bytes!("../probes/zmap/digi1_2362.pkt")),
     (2362, include_bytes!("../probes/zmap/digi2_2362.pkt")),
     (2362, include_bytes!("../probes/zmap/digi3_2362.pkt")),
@@ -64,9 +104,11 @@ pub static PROBES: &[(u16, &[u8])] = &[
     (2727, MGCP_AUDIT_ENDPOINT),
     (2944, MEGACO_SERVICE_CHANGE),
     (2945, MEGACO_SERVICE_CHANGE),
+    (3386, GTP_PRIME_ECHO),
     (3671, KNXNET_IP_SEARCH),
     (3702, include_bytes!("../probes/zmap/wsd_3702.pkt")),
     (4500, IKE_NAT_T),
+    (4500, &IKEV2_SA_INIT_NAT_T),
     (4569, IAX2_POKE),
     (5093, include_bytes!("../probes/zmap/sentinel_5093.pkt")),
     (5783, COAP_WELL_KNOWN_CORE),

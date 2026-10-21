@@ -243,7 +243,7 @@ fn vendored_database_coverage_and_packet_budget_are_preserved() {
     );
     assert_eq!(
         actual,
-        (33_123, 33_223, 90, Some(4)),
+        (33_123, 33_226, 92, Some(5)),
         "probe coverage changed: investigate lost probes or update after syncing the Nmap databases"
     );
 }
@@ -253,8 +253,8 @@ fn full_range_datagram_budget_includes_empty_fallbacks() {
     let per_attempt: usize = (1..=u16::MAX)
         .map(|port| payloads_for(port).len().max(1))
         .sum();
-    assert_eq!(per_attempt, 65_635);
-    assert_eq!(per_attempt * 2, 131_270);
+    assert_eq!(per_attempt, 65_638);
+    assert_eq!(per_attempt * 2, 131_276);
     assert!(payloads_for(0).is_empty());
 }
 
@@ -273,7 +273,7 @@ fn quic_probe_uses_a_reserved_version_and_minimum_initial_datagram_size() {
 #[test]
 fn natt_probe_has_non_esp_marker_and_unmodified_ike_message() {
     let probes = payloads_for(4500);
-    assert_eq!(probes.len(), 1);
+    assert_eq!(probes.len(), 2);
     let probe = probes[0];
     assert_eq!(probe.len(), 196);
     assert_eq!(&probe[..4], &[0; 4]);
@@ -332,4 +332,30 @@ fn fingerprintx_requests_follow_any_nmap_variants() {
     }
     // LwM2M bootstrap reuses Nmap's CoAP request bytes rather than a copy.
     assert!(std::ptr::eq(payloads_for(5783)[0], payloads_for(5683)[0]));
+}
+
+#[test]
+fn ikev2_sa_init_follows_ikev1_and_is_framed_only_on_natt() {
+    let ikev2 = *payloads_for(500).last().unwrap();
+    assert_eq!(ikev2.len(), 420);
+    assert_eq!(&ikev2[..8], b"rustscan");
+    assert_eq!(&ikev2[8..16], &[0; 8]); // No responder SPI yet.
+    assert_eq!(&ikev2[16..20], &[0x21, 0x20, 0x22, 0x08]); // SA, IKEv2, IKE_SA_INIT, initiator.
+    assert_eq!(
+        u32::from_be_bytes(ikev2[24..28].try_into().unwrap()) as usize,
+        ikev2.len()
+    );
+    // KE payload carries DH group 14 and a 256-byte public value.
+    assert_eq!(&ikev2[120..128], b"\x28\x00\x01\x08\x00\x0e\x00\x00");
+    assert_eq!(&ikev2[384..388], b"\x00\x00\x00\x24"); // Last payload: 32-byte nonce.
+    let natt = *payloads_for(4500).last().unwrap();
+    assert_eq!(&natt[..4], &[0; 4]);
+    assert_eq!(&natt[4..], ikev2);
+}
+
+#[test]
+fn gtp_prime_echo_follows_the_nmap_variant() {
+    let payloads = payloads_for(3386);
+    assert_eq!(payloads.len(), 2);
+    assert_eq!(payloads[1], b"\x20\x01\x00\x00\x00\x00\x00\x00");
 }
