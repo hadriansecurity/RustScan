@@ -36,6 +36,9 @@ def ike_natt_request():
 
 
 IKE_NAT_T = ike_natt_request()
+MEGACO = (b"MEGACO/1 [0.0.0.0]\nTransaction = 1 {\n  Context = - {\n"
+          b"    ServiceChange = ROOT {\n      Services {\n        Method = Restart,\n"
+          b"        Reason = \"901 Cold Boot\"\n      }\n    }\n  }\n}\n")
 PROBES = {
     19: [b"\x01"],
     443: [QUIC],
@@ -44,9 +47,23 @@ PROBES = {
     3702: [(VENDOR / "wsd_3702.pkt").read_bytes()],
     4500: [IKE_NAT_T],
     5093: [b"\x7a" + bytes(5)],
+    # Requests sent by the matching fingerprintx plugins.
+    2427: [b"AUEP 9 * MGCP 1.0\r\n\r\n"],
+    2727: [b"AUEP 9 * MGCP 1.0\r\n\r\n"],
+    2944: [MEGACO],
+    2945: [MEGACO],
+    3671: [bytes.fromhex("0610 0201 000e 0801 00000000 0000")],
+    4569: [bytes.fromhex("8000 0000 00000000 00 00 06 1e")],
+    5783: [b"@\x01\x01\xce\xbb.well-known\x04core"],
+    8805: [bytes.fromhex("20 01 000c 000001 00 0060 0004 00000001")],
+    9600: [bytes.fromhex("80 00 02 00 00 00 00 63 00 ef 05 01 00")],
+    34980: [bytes.fromhex("0c40 07 00 0000 0000 0000 0000 0000")],
+    47808: [bytes.fromhex("810a 0008 0100 1008")],
 }
-# Includes the three retained Nmap variants on 443.
-VARIANTS = {19: 1, 443: 4, 2362: 3, 3702: 1, 4500: 1, 5093: 1}
+# Includes the retained Nmap variants on 443, 2427, 34980 and 47808.
+VARIANTS = {19: 1, 443: 4, 2362: 3, 3702: 1, 4500: 1, 5093: 1,
+            2427: 2, 2727: 1, 2944: 1, 2945: 1, 3671: 1, 4569: 1, 5783: 1,
+            8805: 1, 9600: 1, 34980: 2, 47808: 2}
 
 
 def scan(port, host):

@@ -54,9 +54,33 @@ the marker. The old `IPSEC_START` mapping sent an unframed IKE request to both
 It probes IKEv1 Main Mode only; IKEv2-only endpoints and gateways requiring
 negotiation on port 500 first may remain silent. It does not establish a VPN.
 
+Eleven further variants send the request of the matching
+[fingerprintx](https://github.com/hadriansecurity/fingerprintx) UDP plugin
+(commit 02ebd13) to its default port, so service identification gets to see
+the ports it can fingerprint. Fixed values replace the plugins' random message
+IDs.
+
+| Port | Protocol | Request |
+| ---: | --- | --- |
+| 2427, 2727 | MGCP | `AUEP 9 * MGCP 1.0` (audit endpoint) |
+| 2944, 2945 | Megaco/H.248 | Text-mode ServiceChange (Restart, cold boot) |
+| 3671 | KNXnet/IP | Search Request with a NAT HPAI |
+| 4569 | IAX2 | POKE control frame |
+| 5783 | LwM2M bootstrap | Nmap's CoAP `GET /.well-known/core` from 5683 |
+| 8805 | PFCP | Heartbeat Request |
+| 9600 | OMRON FINS | Controller Data Read |
+| 34980 | EtherCAT | Broadcast Read of zero bytes |
+| 47808 | BACnet/IP | Unicast Who-Is |
+
+Nmap variants stay first on 2427 (`RPCCheck`) and 34980 and 47808
+(`ONCRPC_CALL`). Two fingerprintx UDP plugins have no probe here. WireGuard
+silently drops any handshake whose MAC1 is not keyed to the server's public
+key, so no request can elicit a reply; fingerprintx falls back to a port-based
+heuristic. RDP-UDP stays deferred as described below.
+
 The Nmap database and eligibility rules remain unchanged. SQL Browser is still
 excluded; RDP is deferred pending Windows validation. Including supplements,
-there are 33,115 covered ports, 33,212 pairs, and 87 ports with multiple variants.
+there are 33,123 covered ports, 33,223 pairs, and 90 ports with multiple variants.
 
 ## Packet budget
 
@@ -69,16 +93,17 @@ For ports **1–65535**, per target IP:
 
 | Measure | Nmap-only prerequisite | With supplements |
 | --- | ---: | ---: |
-| Ports with a specific probe | 33,110 | 33,115 |
-| Distinct (port, payload) pairs | 33,204 | 33,212 |
+| Ports with a specific probe | 33,110 | 33,123 |
+| Distinct (port, payload) pairs | 33,204 | 33,223 |
 | Maximum variants on one port | 4 | 4 |
-| Maximum datagrams, `--tries 1` (default) | 65,629 | **65,632** |
-| Maximum datagrams, `--tries 2` | 131,258 | **131,264** |
+| Maximum datagrams, `--tries 1` (default) | 65,629 | **65,635** |
+| Maximum datagrams, `--tries 2` | 131,258 | **131,270** |
 
-The bound is `65,535 - 33,115 + 33,212 = 65,632` datagrams per attempt,
-three more than Nmap alone: one extra QUIC variant and three Digi variants
-replacing one empty datagram. The other new probes replace empty datagrams
-without increasing the count. QUIC contributes 1200 payload bytes per attempt.
+The bound is `65,535 - 33,123 + 33,223 = 65,635` datagrams per attempt,
+six more than Nmap alone: one extra QUIC variant, three Digi variants
+replacing one empty datagram, and the fingerprintx requests added beside the
+Nmap variants on 2427, 34980 and 47808. The other new probes replace empty
+datagrams without increasing the count. QUIC contributes 1200 payload bytes per attempt.
 For `--tries N`, multiply by `max(N, 1)`; the CLI treats zero tries as one.
 These are transmitted UDP datagrams, excluding IP/UDP headers, ICMP responses,
 and any separate Nmap follow-up. Explicitly including port 0 adds one empty
@@ -145,7 +170,7 @@ formatting, and the documentation build.
 
 The supplemental wire fixtures check every variant over IPv4 and IPv6, with
 silent, closed, and alternate-source-port controls and retry packet counts
-(52 scenarios). The NAT-T fixture independently encodes the IKE proposal and
+(140 scenarios). The NAT-T fixture independently encodes the IKE proposal and
 only responds to the complete framed request. Rust tests also verify its marker,
 IKE header and length, and agreement with the pinned Nmap IKE body. These checks
 validate wire delivery and classification; representative VPN gateway validation
