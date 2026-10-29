@@ -50,20 +50,19 @@ UDP/4500 uses the pinned Nmap `IKE_MAIN_MODE` request prefixed with four zero
 bytes, the Non-ESP Marker required by [RFC 3948 section 2.2](https://www.rfc-editor.org/rfc/rfc3948.html#section-2.2).
 The 196-byte datagram contains a 192-byte IKE message; the IKE length excludes
 the marker. The old `IPSEC_START` mapping sent an unframed IKE request to both
-500 and 4500. This supplement leaves port 500 and the Nmap database unchanged.
-It probes IKEv1 Main Mode only; IKEv2-only endpoints and gateways requiring
-negotiation on port 500 first may remain silent. It does not establish a VPN.
+500 and 4500. Gateways that only accept NAT-T after negotiating on port 500 may
+still stay silent on 4500. Neither IKE request establishes a VPN.
 
 Fourteen further variants send the request of the matching
 [fingerprintx](https://github.com/hadriansecurity/fingerprintx) UDP plugin
-(commit 02ebd13) to its default port, so service identification gets to see
-the ports it can fingerprint. Fixed values replace the plugins' random message
-IDs.
+(commit 64ef00c, the version service-recognizer pins) to its default port, so
+service identification gets to see the ports it can fingerprint. Fixed values
+replace the plugins' random message IDs.
 
 | Port | Protocol | Request |
 | ---: | --- | --- |
-| 2427, 2727 | MGCP | `AUEP 9 * MGCP 1.0` (audit endpoint) |
 | 500, 4500 | IKEv2 | IKE_SA_INIT (AES-CBC, SHA2/SHA1, DH group 14); Non-ESP Marker on 4500 |
+| 2427, 2727 | MGCP | `AUEP 9 * MGCP 1.0` (audit endpoint) |
 | 2944, 2945 | Megaco/H.248 | Text-mode ServiceChange (Restart, cold boot) |
 | 3386 | GTP′ | v1 Echo Request with the 6-octet header (TS 32.295) |
 | 3671 | KNXnet/IP | Search Request with a NAT HPAI |
@@ -74,13 +73,24 @@ IDs.
 | 34980 | EtherCAT | Broadcast Read of zero bytes |
 | 47808 | BACnet/IP | Unicast Who-Is |
 
-Nmap variants stay first on 500 and 4500 (IKEv1 only), 2427 (`RPCCheck`),
-3386 (`GPRS_GTPv2prime`, a GTPv2-format Echo), and 34980 and 47808
-(`ONCRPC_CALL`). The IKEv2 key exchange and nonce use fixed fills instead of
-random bytes; any value in [2, p-2] is a valid group 14 public value. Two fingerprintx UDP plugins have no probe here. WireGuard
-silently drops any handshake whose MAC1 is not keyed to the server's public
-key, so no request can elicit a reply; fingerprintx falls back to a port-based
-heuristic. RDP-UDP stays deferred as described below.
+Existing variants stay first: Nmap's `RPCCheck`, `NetMotionMobility`, `OpenVPN`
+and `IKE_MAIN_MODE` on 500, the IKEv1 NAT-T supplement on 4500, `RPCCheck` on
+2427, `GPRS_GTPv2prime` (a GTPv2-format Echo) on 3386, and `ONCRPC_CALL` on
+34980 and 47808. The IKEv2 key exchange and nonce use fixed fills instead of
+random bytes; any value in [2, p-2] is a valid group 14 public value. The 4500
+copy uses its own initiator SPI: with identical requests on both ports,
+libreswan treated the second as a retransmit and answered only one of them.
+
+Two requests differ from fingerprintx or may go unanswered. The EtherCAT frame
+header is `0c 10` (type 1, commands); fingerprintx sends `0c 40`, which encodes
+type 4 (network variables). `AUEP` is a call agent command, so a call agent on
+2727 may ignore it: Asterisk drops any AUEP whose endpoint does not name a
+configured gateway. fingerprintx sends the same request there.
+
+Two fingerprintx UDP plugins have no probe here. WireGuard silently drops any
+handshake whose MAC1 is not keyed to the server's public key, so no request can
+elicit a reply; fingerprintx falls back to a port-based heuristic. RDP-UDP
+stays deferred as described below.
 
 The Nmap database and eligibility rules remain unchanged. SQL Browser is still
 excluded; RDP is deferred pending Windows validation. Including supplements,
@@ -108,7 +118,8 @@ nine more than Nmap alone: one extra QUIC variant, three Digi variants
 replacing one empty datagram, and the fingerprintx requests added beside the
 Nmap variants on 500, 2427, 3386, 34980 and 47808, plus IKEv2 beside the
 IKEv1 NAT-T variant on 4500. The other new probes replace empty
-datagrams without increasing the count. QUIC contributes 1200 payload bytes per attempt.
+datagrams without increasing the count. QUIC contributes 1200 payload bytes
+per attempt.
 For `--tries N`, multiply by `max(N, 1)`; the CLI treats zero tries as one.
 These are transmitted UDP datagrams, excluding IP/UDP headers, ICMP responses,
 and any separate Nmap follow-up. Explicitly including port 0 adds one empty

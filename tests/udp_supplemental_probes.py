@@ -39,7 +39,7 @@ IKE_NAT_T = ike_natt_request()
 
 
 # Independently encode fingerprintx's IKEv2 IKE_SA_INIT (RFC 7296).
-def ikev2_sa_init():
+def ikev2_sa_init(initiator_spi):
     def proposal(number, key_bits, integrity, prf):
         transforms = [(1, 12, struct.pack("!HH", 0x800e, key_bits)), (3, integrity, b""),
                       (2, prf, b""), (4, 14, b"")]
@@ -53,10 +53,10 @@ def ikev2_sa_init():
     ke = struct.pack("!BBHHH", 40, 0, 264, 14, 0) + b"\x5a" * 256
     nonce = struct.pack("!BBH", 0, 0, 36) + b"\xa5" * 32
     body = sa + ke + nonce
-    return b"rustscan" + bytes(8) + struct.pack("!BBBBII", 33, 0x20, 34, 8, 0, 28 + len(body)) + body
+    return initiator_spi + bytes(8) + struct.pack("!BBBBII", 33, 0x20, 34, 8, 0, 28 + len(body)) + body
 
 
-IKEV2 = ikev2_sa_init()
+IKEV2 = ikev2_sa_init(b"rustscan")
 MEGACO = (b"MEGACO/1 [0.0.0.0]\nTransaction = 1 {\n  Context = - {\n"
           b"    ServiceChange = ROOT {\n      Services {\n        Method = Restart,\n"
           b"        Reason = \"901 Cold Boot\"\n      }\n    }\n  }\n}\n")
@@ -67,7 +67,7 @@ PROBES = {
            for magic in [b"DIGI", b"DVKT", b"DGDP"]],
     3702: [(VENDOR / "wsd_3702.pkt").read_bytes()],
     500: [IKEV2],
-    4500: [IKE_NAT_T, bytes(4) + IKEV2],
+    4500: [IKE_NAT_T, bytes(4) + ikev2_sa_init(b"rustscnT")],
     5093: [b"\x7a" + bytes(5)],
     # Requests sent by the matching fingerprintx plugins.
     2427: [b"AUEP 9 * MGCP 1.0\r\n\r\n"],
@@ -80,7 +80,7 @@ PROBES = {
     5783: [b"@\x01\x01\xce\xbb.well-known\x04core"],
     8805: [bytes.fromhex("20 01 000c 000001 00 0060 0004 00000001")],
     9600: [bytes.fromhex("80 00 02 00 00 00 00 63 00 ef 05 01 00")],
-    34980: [bytes.fromhex("0c40 07 00 0000 0000 0000 0000 0000")],
+    34980: [bytes.fromhex("0c10 07 00 0000 0000 0000 0000 0000")],
     47808: [bytes.fromhex("810a 0008 0100 1008")],
 }
 # Includes the retained Nmap variants on 443, 500, 2427, 3386, 34980 and 47808.

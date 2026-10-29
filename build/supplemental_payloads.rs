@@ -36,16 +36,20 @@ static IKE_NAT_T: &[u8] = b"\x00\x00\x00\x00\x00\x11\x22\x33\x44\x55\x66\x77\x00
     \x80\x03\x00\x01\x80\x04\x00\x02\x80\x0b\x00\x01\x00\x0c\x00\x04\
     \x00\x00\x00\x01";
 
-// Requests sent by the hadriansecurity/fingerprintx UDP plugins at 02ebd13, so
-// discovery reaches the ports those plugins identify. Fixed values replace the
-// plugins' random IDs; a reply only needs to reach the scanner's socket.
+// Requests sent by the hadriansecurity/fingerprintx UDP plugins at 64ef00c (the
+// version service-recognizer pins), so discovery reaches the ports those plugins
+// identify. Fixed values replace the plugins' random IDs; a reply only needs to
+// reach the scanner's socket.
 static BACNET_WHO_IS: &[u8] = b"\x81\x0a\x00\x08\x01\x00\x10\x08";
 // Nmap's coap-request, also the LwM2M plugin's request on the bootstrap port.
 static COAP_WELL_KNOWN_CORE: &[u8] = b"@\x01\x01\xce\xbb.well-known\x04core";
-static ETHERCAT_BROADCAST_READ: &[u8] = b"\x0c\x40\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+// Frame type 1 (commands) sits in bits 12-15 of the header. fingerprintx sets
+// bit 14 instead, which encodes type 4 (network variables).
+static ETHERCAT_BROADCAST_READ: &[u8] = b"\x0c\x10\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 static IAX2_POKE: &[u8] = b"\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x06\x1e";
 static KNXNET_IP_SEARCH: &[u8] = b"\x06\x10\x02\x01\x00\x0e\x08\x01\x00\x00\x00\x00\x00\x00";
 static MEGACO_SERVICE_CHANGE: &[u8] = b"MEGACO/1 [0.0.0.0]\nTransaction = 1 {\n  Context = - {\n    ServiceChange = ROOT {\n      Services {\n        Method = Restart,\n        Reason = \"901 Cold Boot\"\n      }\n    }\n  }\n}\n";
+// AUEP is a call agent command, so call agents on 2727 may not answer it.
 static MGCP_AUDIT_ENDPOINT: &[u8] = b"AUEP 9 * MGCP 1.0\r\n\r\n";
 static OMRON_FINS_CONTROLLER_DATA_READ: &[u8] =
     b"\x80\x00\x02\x00\x00\x00\x00\x63\x00\xef\x05\x01\x00";
@@ -56,9 +60,8 @@ static GTP_PRIME_ECHO: &[u8] = b"\x2e\x01\x00\x00\x00\x00";
 // fingerprintx's IKEv2 IKE_SA_INIT (RFC 7296): AES-CBC, SHA2/SHA1, DH group 14.
 // Any value in [2, p-2] is a valid group 14 public key, so a fixed fill works.
 const IKEV2_SA_INIT_LEN: usize = 420;
-const fn ikev2_sa_init<const N: usize>() -> [u8; N] {
-    let header = *b"rustscan\
-    \x00\x00\x00\x00\x00\x00\x00\x00\x21\x20\x22\x08\x00\x00\x00\x00\
+const fn ikev2_sa_init(initiator_spi: [u8; 8]) -> [u8; IKEV2_SA_INIT_LEN] {
+    let header = *b"\x00\x00\x00\x00\x00\x00\x00\x00\x21\x20\x22\x08\x00\x00\x00\x00\
     \x00\x00\x01\xa4\x22\x00\x00\x5c\x02\x00\x00\x2c\x01\x01\x00\x04\
     \x03\x00\x00\x0c\x01\x00\x00\x0c\x80\x0e\x01\x00\x03\x00\x00\x08\
     \x03\x00\x00\x0c\x03\x00\x00\x08\x02\x00\x00\x05\x00\x00\x00\x08\
@@ -67,18 +70,19 @@ const fn ikev2_sa_init<const N: usize>() -> [u8; N] {
     \x03\x00\x00\x08\x02\x00\x00\x02\x00\x00\x00\x08\x04\x00\x00\x0e\
     \x28\x00\x01\x08\x00\x0e\x00\x00";
     let nonce_header = *b"\x00\x00\x00\x24";
-    // Bytes before the message: the Non-ESP Marker on UDP/4500, else none.
-    let start = N - IKEV2_SA_INIT_LEN;
-    let mut packet = [0; N];
-    let key_exchange_end = header.len() + 256;
+    let key_exchange_start = initiator_spi.len() + header.len();
+    let nonce_header_start = key_exchange_start + 256;
+    let mut packet = [0; IKEV2_SA_INIT_LEN];
     let mut index = 0;
     while index < IKEV2_SA_INIT_LEN {
-        packet[start + index] = if index < header.len() {
-            header[index]
-        } else if index < key_exchange_end {
+        packet[index] = if index < initiator_spi.len() {
+            initiator_spi[index]
+        } else if index < key_exchange_start {
+            header[index - initiator_spi.len()]
+        } else if index < nonce_header_start {
             0x5a
-        } else if index < key_exchange_end + nonce_header.len() {
-            nonce_header[index - key_exchange_end]
+        } else if index < nonce_header_start + nonce_header.len() {
+            nonce_header[index - nonce_header_start]
         } else {
             0xa5
         };
@@ -87,8 +91,22 @@ const fn ikev2_sa_init<const N: usize>() -> [u8; N] {
     packet
 }
 
-static IKEV2_SA_INIT: [u8; IKEV2_SA_INIT_LEN] = ikev2_sa_init();
-static IKEV2_SA_INIT_NAT_T: [u8; IKEV2_SA_INIT_LEN + 4] = ikev2_sa_init();
+// RFC 3948 section 2.2: IKE on UDP/4500 follows a four-byte Non-ESP Marker.
+const fn with_non_esp_marker(message: [u8; IKEV2_SA_INIT_LEN]) -> [u8; IKEV2_SA_INIT_LEN + 4] {
+    let mut packet = [0; IKEV2_SA_INIT_LEN + 4];
+    let mut index = 0;
+    while index < IKEV2_SA_INIT_LEN {
+        packet[4 + index] = message[index];
+        index += 1;
+    }
+    packet
+}
+
+static IKEV2_SA_INIT: [u8; IKEV2_SA_INIT_LEN] = ikev2_sa_init(*b"rustscan");
+// With the same SPI, libreswan treats the second copy as a retransmit of the
+// first and answers only one of 500 and 4500.
+static IKEV2_SA_INIT_NAT_T: [u8; IKEV2_SA_INIT_LEN + 4] =
+    with_non_esp_marker(ikev2_sa_init(*b"rustscnT"));
 
 // The six ZMap files are unmodified. Provenance and hashes: probes/zmap/README.md.
 // Append after Nmap so existing variants retain their ordering. SQL Browser

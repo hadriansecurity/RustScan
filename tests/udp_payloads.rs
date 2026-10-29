@@ -294,11 +294,16 @@ fn natt_probe_has_non_esp_marker_and_unmodified_ike_message() {
     assert!(!payloads_for(500).contains(&probe)); // NAT-T framing is only for 4500.
 }
 
+const MEGACO_SERVICE_CHANGE: &[u8] = b"MEGACO/1 [0.0.0.0]\nTransaction = 1 {\n  Context = - {\n    ServiceChange = ROOT {\n      Services {\n        Method = Restart,\n        Reason = \"901 Cold Boot\"\n      }\n    }\n  }\n}\n";
+
 #[test]
 fn fingerprintx_requests_follow_any_nmap_variants() {
     for (port, nmap_variants, request) in [
         (2427, 1, b"AUEP 9 * MGCP 1.0\r\n\r\n".as_slice()),
         (2727, 0, b"AUEP 9 * MGCP 1.0\r\n\r\n"),
+        (2944, 0, MEGACO_SERVICE_CHANGE),
+        (2945, 0, MEGACO_SERVICE_CHANGE),
+        (3386, 1, b"\x2e\x01\x00\x00\x00\x00"),
         (
             3671,
             0,
@@ -318,7 +323,7 @@ fn fingerprintx_requests_follow_any_nmap_variants() {
         (
             34980,
             1,
-            b"\x0c\x40\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x0c\x10\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ),
         (47808, 1, b"\x81\x0a\x00\x08\x01\x00\x10\x08"),
     ] {
@@ -326,17 +331,15 @@ fn fingerprintx_requests_follow_any_nmap_variants() {
         assert_eq!(payloads.len(), nmap_variants + 1, "udp/{port}");
         assert_eq!(payloads.last().copied(), Some(request), "udp/{port}");
     }
-    for port in [2944, 2945] {
-        assert_eq!(payloads_for(port).len(), 1);
-        assert!(payloads_for(port)[0].starts_with(b"MEGACO/1 [0.0.0.0]\nTransaction = 1 {"));
-    }
     // LwM2M bootstrap reuses Nmap's CoAP request bytes rather than a copy.
     assert!(std::ptr::eq(payloads_for(5783)[0], payloads_for(5683)[0]));
 }
 
 #[test]
-fn ikev2_sa_init_follows_ikev1_and_is_framed_only_on_natt() {
-    let ikev2 = *payloads_for(500).last().unwrap();
+fn ikev2_sa_init_follows_ikev1_and_natt_copy_has_its_own_spi() {
+    let probes = payloads_for(500);
+    assert_eq!(probes.len(), 5); // Four Nmap variants, then IKEv2.
+    let ikev2 = probes[4];
     assert_eq!(ikev2.len(), 420);
     assert_eq!(&ikev2[..8], b"rustscan");
     assert_eq!(&ikev2[8..16], &[0; 8]); // No responder SPI yet.
@@ -348,14 +351,11 @@ fn ikev2_sa_init_follows_ikev1_and_is_framed_only_on_natt() {
     // KE payload carries DH group 14 and a 256-byte public value.
     assert_eq!(&ikev2[120..128], b"\x28\x00\x01\x08\x00\x0e\x00\x00");
     assert_eq!(&ikev2[384..388], b"\x00\x00\x00\x24"); // Last payload: 32-byte nonce.
-    let natt = *payloads_for(4500).last().unwrap();
-    assert_eq!(&natt[..4], &[0; 4]);
-    assert_eq!(&natt[4..], ikev2);
-}
 
-#[test]
-fn gtp_prime_echo_follows_the_nmap_variant() {
-    let payloads = payloads_for(3386);
-    assert_eq!(payloads.len(), 2);
-    assert_eq!(payloads[1], b"\x2e\x01\x00\x00\x00\x00");
+    let probes = payloads_for(4500);
+    assert_eq!(probes.len(), 2); // IKEv1 NAT-T, then IKEv2.
+    let natt = probes[1];
+    assert_eq!(&natt[..4], &[0; 4]);
+    assert_eq!(&natt[4..12], b"rustscnT");
+    assert_eq!(&natt[12..], &ikev2[8..]);
 }
