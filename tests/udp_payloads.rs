@@ -243,7 +243,7 @@ fn vendored_database_coverage_and_packet_budget_are_preserved() {
     );
     assert_eq!(
         actual,
-        (33_123, 33_226, 92, Some(5)),
+        (33_125, 33_228, 92, Some(5)),
         "probe coverage changed: investigate lost probes or update after syncing the Nmap databases"
     );
 }
@@ -299,7 +299,15 @@ const MEGACO_SERVICE_CHANGE: &[u8] = b"MEGACO/1 [0.0.0.0]\nTransaction = 1 {\n  
 #[test]
 fn fingerprintx_requests_follow_any_nmap_variants() {
     for (port, nmap_variants, request) in [
-        (2427, 1, b"AUEP 9 * MGCP 1.0\r\n\r\n".as_slice()),
+        (
+            862,
+            0,
+            b"\x66\x78\x00\x01\xed\x5b\x2c\x00\x00\x00\x00\x00\x00\x01\
+              \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+              \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+                .as_slice(),
+        ),
+        (2427, 1, b"AUEP 9 * MGCP 1.0\r\n\r\n"),
         (2727, 0, b"AUEP 9 * MGCP 1.0\r\n\r\n"),
         (2944, 0, MEGACO_SERVICE_CHANGE),
         (2945, 0, MEGACO_SERVICE_CHANGE),
@@ -325,6 +333,7 @@ fn fingerprintx_requests_follow_any_nmap_variants() {
             1,
             b"\x0c\x10\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ),
+        (24224, 0, b"\x01"),
         (47808, 1, b"\x81\x0a\x00\x08\x01\x00\x10\x08"),
     ] {
         let payloads = payloads_for(port);
