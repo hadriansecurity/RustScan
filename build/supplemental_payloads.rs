@@ -56,6 +56,14 @@ static OMRON_FINS_CONTROLLER_DATA_READ: &[u8] =
 static PFCP_HEARTBEAT: &[u8] = b"\x20\x01\x00\x0c\x00\x00\x01\x00\x00\x60\x00\x04\x00\x00\x00\x01";
 // GTP' v1 Echo Request with the 6-octet header (TS 32.295 section 6.1).
 static GTP_PRIME_ECHO: &[u8] = b"\x2e\x01\x00\x00\x00\x00";
+// Requests of the fluentd and twamp plugins in hadriansecurity/fingerprintx#105.
+// Fluentd answers any datagram with a NUL byte, so the request is not one.
+static FLUENTD_HEARTBEAT: &[u8] = b"\x01";
+// RFC 5357 unauthenticated test packet (sequence number, timestamp, error
+// estimate), zero-padded to the 41-byte length a reflector sends back.
+static TWAMP_TEST_PACKET: &[u8] = b"\x66\x78\x00\x01\xed\x5b\x2c\x00\x00\x00\x00\x00\x00\x01\
+    \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+    \x00\x00\x00\x00\x00\x00";
 
 // fingerprintx's IKEv2 IKE_SA_INIT (RFC 7296): AES-CBC, SHA2/SHA1, DH group 14.
 // Any value in [2, p-2] is a valid group 14 public key, so a fixed fill works.
@@ -114,6 +122,7 @@ static IKEV2_SA_INIT_NAT_T: [u8; IKEV2_SA_INIT_LEN + 4] =
 pub static PROBES: &[(u16, &[u8])] = &[
     (19, include_bytes!("../probes/zmap/chargen_19.pkt")),
     (443, &QUIC),
+    (862, TWAMP_TEST_PACKET),
     (500, &IKEV2_SA_INIT),
     (2362, include_bytes!("../probes/zmap/digi1_2362.pkt")),
     (2362, include_bytes!("../probes/zmap/digi2_2362.pkt")),
@@ -132,6 +141,7 @@ pub static PROBES: &[(u16, &[u8])] = &[
     (5783, COAP_WELL_KNOWN_CORE),
     (8805, PFCP_HEARTBEAT),
     (9600, OMRON_FINS_CONTROLLER_DATA_READ),
+    (24224, FLUENTD_HEARTBEAT),
     (34980, ETHERCAT_BROADCAST_READ),
     (47808, BACNET_WHO_IS),
 ];

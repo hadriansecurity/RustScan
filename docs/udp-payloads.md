@@ -73,6 +73,14 @@ replace the plugins' random message IDs.
 | 34980 | EtherCAT | Broadcast Read of zero bytes |
 | 47808 | BACnet/IP | Unicast Who-Is |
 
+Two more send the requests of the plugins added in
+[fingerprintx#105](https://github.com/hadriansecurity/fingerprintx/pull/105):
+
+| Port | Protocol | Request |
+| ---: | --- | --- |
+| 862 | TWAMP Light | Unauthenticated test packet padded to 41 bytes (RFC 5357) |
+| 24224 | Fluentd forward | One `01` byte; the heartbeat listener answers any datagram with `00` |
+
 Existing variants stay first: Nmap's `RPCCheck`, `NetMotionMobility`, `OpenVPN`
 and `IKE_MAIN_MODE` on 500, the IKEv1 NAT-T supplement on 4500, `RPCCheck` on
 2427, `GPRS_GTPv2prime` (a GTPv2-format Echo) on 3386, and `ONCRPC_CALL` on
@@ -94,7 +102,7 @@ stays deferred as described below.
 
 The Nmap database and eligibility rules remain unchanged. SQL Browser is still
 excluded; RDP is deferred pending Windows validation. Including supplements,
-there are 33,123 covered ports, 33,226 pairs, and 92 ports with multiple variants.
+there are 33,125 covered ports, 33,228 pairs, and 92 ports with multiple variants.
 
 ## Packet budget
 
@@ -107,13 +115,13 @@ For ports **1–65535**, per target IP:
 
 | Measure | Nmap-only prerequisite | With supplements |
 | --- | ---: | ---: |
-| Ports with a specific probe | 33,110 | 33,123 |
-| Distinct (port, payload) pairs | 33,204 | 33,226 |
+| Ports with a specific probe | 33,110 | 33,125 |
+| Distinct (port, payload) pairs | 33,204 | 33,228 |
 | Maximum variants on one port | 4 | 5 |
 | Maximum datagrams, `--tries 1` (default) | 65,629 | **65,638** |
 | Maximum datagrams, `--tries 2` | 131,258 | **131,276** |
 
-The bound is `65,535 - 33,123 + 33,226 = 65,638` datagrams per attempt,
+The bound is `65,535 - 33,125 + 33,228 = 65,638` datagrams per attempt,
 nine more than Nmap alone: one extra QUIC variant, three Digi variants
 replacing one empty datagram, and the fingerprintx requests added beside the
 Nmap variants on 500, 2427, 3386, 34980 and 47808, plus IKEv2 beside the
