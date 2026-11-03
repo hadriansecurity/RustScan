@@ -81,10 +81,30 @@ Two more send the requests of the plugins added in
 | 862 | TWAMP Light | Unauthenticated test packet padded to 41 bytes (RFC 5357) |
 | 24224 | Fluentd forward | One `01` byte; the heartbeat listener answers any datagram with `00` |
 
+Four ICS requests come from the UDP plugins added in
+[fingerprintx#142](https://github.com/hadriansecurity/fingerprintx/pull/142):
+
+| Port | Protocol | Request |
+| ---: | --- | --- |
+| 5006 | MELSEC (MELSOFT) | plcscan `melsecq-discover-udp` CPU info request |
+| 5094 | HART-IP | Session Initiate, 20 s inactivity timer |
+| 20000 | DNP3 | 84 Request Link Status frames in one 840-byte datagram |
+| 44818 | EtherNet/IP | List Identity, as Nmap's `enip-info` sends it |
+
+A DNP3 outstation only answers a frame addressed to it from its configured
+master, so the datagram carries one frame per pair of 6 common master and 14
+common outstation addresses, 0xFFFC (self address) included. An outstation in
+UDP-only mode that answers a configured master port instead of the request's
+source port stays silent. RustScan never closes the HART-IP session it opens,
+so the request asks for the 20 s timer `hartip-info` uses rather than the 60 s
+of the fingerprintx TCP plugin; the UDP plugin closes its own session. UDP/2222
+(EtherNet/IP implicit I/O) gets no probe: it only carries cyclic data after a
+connection is opened over TCP/44818.
+
 Existing variants stay first: Nmap's `RPCCheck`, `NetMotionMobility`, `OpenVPN`
 and `IKE_MAIN_MODE` on 500, the IKEv1 NAT-T supplement on 4500, `RPCCheck` on
 2427, `GPRS_GTPv2prime` (a GTPv2-format Echo) on 3386, and `ONCRPC_CALL` on
-34980 and 47808. The IKEv2 key exchange and nonce use fixed fills instead of
+34980, 47808 and 44818. The IKEv2 key exchange and nonce use fixed fills instead of
 random bytes; any value in [2, p-2] is a valid group 14 public value. The 4500
 copy uses its own initiator SPI: with identical requests on both ports,
 libreswan treated the second as a retransmit and answered only one of them.
@@ -102,7 +122,7 @@ stays deferred as described below.
 
 The Nmap database and eligibility rules remain unchanged. SQL Browser is still
 excluded; RDP is deferred pending Windows validation. Including supplements,
-there are 33,125 covered ports, 33,228 pairs, and 92 ports with multiple variants.
+there are 33,128 covered ports, 33,232 pairs, and 93 ports with multiple variants.
 
 ## Packet budget
 
@@ -115,19 +135,19 @@ For ports **1–65535**, per target IP:
 
 | Measure | Nmap-only prerequisite | With supplements |
 | --- | ---: | ---: |
-| Ports with a specific probe | 33,110 | 33,125 |
-| Distinct (port, payload) pairs | 33,204 | 33,228 |
+| Ports with a specific probe | 33,110 | 33,128 |
+| Distinct (port, payload) pairs | 33,204 | 33,232 |
 | Maximum variants on one port | 4 | 5 |
-| Maximum datagrams, `--tries 1` (default) | 65,629 | **65,638** |
-| Maximum datagrams, `--tries 2` | 131,258 | **131,276** |
+| Maximum datagrams, `--tries 1` (default) | 65,629 | **65,639** |
+| Maximum datagrams, `--tries 2` | 131,258 | **131,278** |
 
-The bound is `65,535 - 33,125 + 33,228 = 65,638` datagrams per attempt,
-nine more than Nmap alone: one extra QUIC variant, three Digi variants
+The bound is `65,535 - 33,128 + 33,232 = 65,639` datagrams per attempt,
+ten more than Nmap alone: one extra QUIC variant, three Digi variants
 replacing one empty datagram, and the fingerprintx requests added beside the
-Nmap variants on 500, 2427, 3386, 34980 and 47808, plus IKEv2 beside the
+Nmap variants on 500, 2427, 3386, 34980, 47808 and 44818, plus IKEv2 beside the
 IKEv1 NAT-T variant on 4500. The other new probes replace empty
 datagrams without increasing the count. QUIC contributes 1200 payload bytes
-per attempt.
+per attempt, and the DNP3 probe 840.
 For `--tries N`, multiply by `max(N, 1)`; the CLI treats zero tries as one.
 These are transmitted UDP datagrams, excluding IP/UDP headers, ICMP responses,
 and any separate Nmap follow-up. Explicitly including port 0 adds one empty
@@ -194,7 +214,7 @@ formatting, and the documentation build.
 
 The supplemental wire fixtures check every variant over IPv4 and IPv6, with
 silent, closed, and alternate-source-port controls and retry packet counts
-(158 scenarios). The NAT-T fixture independently encodes the IKE proposal and
+(218 scenarios). The NAT-T fixture independently encodes the IKE proposal and
 only responds to the complete framed request. Rust tests also verify its marker,
 IKE header and length, and agreement with the pinned Nmap IKE body. These checks
 validate wire delivery and classification; representative VPN gateway validation

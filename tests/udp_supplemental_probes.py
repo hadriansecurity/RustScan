@@ -60,6 +60,23 @@ IKEV2 = ikev2_sa_init(b"rustscan")
 MEGACO = (b"MEGACO/1 [0.0.0.0]\nTransaction = 1 {\n  Context = - {\n"
           b"    ServiceChange = ROOT {\n      Services {\n        Method = Restart,\n"
           b"        Reason = \"901 Cold Boot\"\n      }\n    }\n  }\n}\n")
+def dnp3_request_link_status():
+    def crc(data):
+        value = 0
+        for byte in data:
+            value ^= byte
+            for _ in range(8):
+                value = (value >> 1) ^ 0xA6BC if value & 1 else value >> 1
+        return ~value & 0xFFFF
+
+    probe = b""
+    for master in [1, 0, 2, 3, 100, 1024]:
+        for outstation in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 1024, 0xFFFC]:
+            header = b"\x05\x64\x05\xc9" + struct.pack("<HH", outstation, master)
+            probe += header + struct.pack("<H", crc(header))
+    return probe
+
+
 PROBES = {
     19: [b"\x01"],
     443: [QUIC],
@@ -84,11 +101,17 @@ PROBES = {
     47808: [bytes.fromhex("810a 0008 0100 1008")],
     24224: [b"\x01"],
     862: [bytes.fromhex("66780001 ed5b2c0000000000 0001") + bytes(27)],
+    5006: [bytes.fromhex("5700 0000 0011 1107 0000 ffff 0300 00fe 0300 0014 001c 080a"
+                         "0800 0000 0000 0000 0401 0101 0000 0001")],
+    5094: [bytes.fromhex("0100 0000 5253 000d 01 00004e20")],
+    20000: [dnp3_request_link_status()],
+    44818: [bytes.fromhex("6300 0000 00000000 00000000 c1debed1 00000000 00000000")],
 }
-# Includes the retained Nmap variants on 443, 500, 2427, 3386, 34980 and 47808.
+# Includes the retained Nmap variants on 443, 500, 2427, 3386, 34980, 47808 and 44818.
 VARIANTS = {19: 1, 443: 4, 500: 5, 2362: 3, 3386: 2, 3702: 1, 4500: 2, 5093: 1,
             2427: 2, 2727: 1, 2944: 1, 2945: 1, 3671: 1, 4569: 1, 5783: 1,
-            8805: 1, 9600: 1, 34980: 2, 47808: 2, 862: 1, 24224: 1}
+            8805: 1, 9600: 1, 34980: 2, 47808: 2, 862: 1, 24224: 1,
+            5006: 1, 5094: 1, 20000: 1, 44818: 2}
 
 
 def scan(port, host):

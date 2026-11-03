@@ -243,7 +243,7 @@ fn vendored_database_coverage_and_packet_budget_are_preserved() {
     );
     assert_eq!(
         actual,
-        (33_125, 33_228, 92, Some(5)),
+        (33_128, 33_232, 93, Some(5)),
         "probe coverage changed: investigate lost probes or update after syncing the Nmap databases"
     );
 }
@@ -253,8 +253,8 @@ fn full_range_datagram_budget_includes_empty_fallbacks() {
     let per_attempt: usize = (1..=u16::MAX)
         .map(|port| payloads_for(port).len().max(1))
         .sum();
-    assert_eq!(per_attempt, 65_638);
-    assert_eq!(per_attempt * 2, 131_276);
+    assert_eq!(per_attempt, 65_639);
+    assert_eq!(per_attempt * 2, 131_278);
     assert!(payloads_for(0).is_empty());
 }
 
@@ -335,6 +335,24 @@ fn fingerprintx_requests_follow_any_nmap_variants() {
         ),
         (24224, 0, b"\x01"),
         (47808, 1, b"\x81\x0a\x00\x08\x01\x00\x10\x08"),
+        (
+            5006,
+            0,
+            b"\x57\x00\x00\x00\x00\x11\x11\x07\x00\x00\xff\xff\x03\x00\x00\xfe\
+              \x03\x00\x00\x14\x00\x1c\x08\x0a\x08\x00\x00\x00\x00\x00\x00\x00\
+              \x04\x01\x01\x01\x00\x00\x00\x01",
+        ),
+        (
+            5094,
+            0,
+            b"\x01\x00\x00\x00\x52\x53\x00\x0d\x01\x00\x00\x4e\x20",
+        ),
+        (
+            44818,
+            1,
+            b"\x63\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+              \xc1\xde\xbe\xd1\x00\x00\x00\x00\x00\x00\x00\x00",
+        ),
     ] {
         let payloads = payloads_for(port);
         assert_eq!(payloads.len(), nmap_variants + 1, "udp/{port}");
@@ -342,6 +360,24 @@ fn fingerprintx_requests_follow_any_nmap_variants() {
     }
     // LwM2M bootstrap reuses Nmap's CoAP request bytes rather than a copy.
     assert!(std::ptr::eq(payloads_for(5783)[0], payloads_for(5683)[0]));
+}
+
+#[test]
+fn dnp3_probe_carries_a_request_link_status_per_address_pair() {
+    let probes = payloads_for(20000);
+    assert_eq!(probes.len(), 1);
+    let probe = probes[0];
+    assert_eq!(probe.len(), 84 * 10);
+    let frames: Vec<_> = probe.chunks(10).collect();
+    for frame in &frames {
+        assert_eq!(&frame[..4], b"\x05\x64\x05\xc9");
+    }
+    // Master 0 to outstation 0, as captured from a Shodan banner.
+    assert_eq!(frames[14], b"\x05\x64\x05\xc9\x00\x00\x00\x00\x36\x4c");
+    let mut unique = frames.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), frames.len());
 }
 
 #[test]
