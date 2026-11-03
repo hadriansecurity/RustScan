@@ -73,10 +73,11 @@ static ENIP_LIST_IDENTITY: &[u8] = b"\x63\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0
 // Session Initiate with a 20 s inactivity timer: the session is never closed,
 // and devices allow only a few.
 static HARTIP_SESSION_INITIATE: &[u8] = b"\x01\x00\x00\x00\x52\x53\x00\x0d\x01\x00\x00\x4e\x20";
-// The plcscan melsecq-discover-udp CPU info request.
+// The plcscan melsecq-discover-udp CPU info request, as a real Q03UDECPU
+// receives it; the length field (0x0014) counts the 20 bytes after offset 21.
 static MELSEC_CPU_INFO: &[u8] = b"\x57\x00\x00\x00\x00\x11\x11\x07\x00\x00\xff\xff\x03\x00\x00\xfe\
     \x03\x00\x00\x14\x00\x1c\x08\x0a\x08\x00\x00\x00\x00\x00\x00\x00\x04\x01\x01\x01\
-    \x00\x00\x00\x01";
+    \x00\x00\x00\x00\x01";
 
 // An outstation answers only frames from its configured master to its own
 // address, so one datagram carries Request Link Status for every likely pair.
