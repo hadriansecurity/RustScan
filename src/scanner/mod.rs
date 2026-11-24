@@ -799,11 +799,19 @@ mod tests {
     #[test]
     fn udp_ssdp_probe_decodes_escapes_and_literal_text() {
         let payload = payloads_for(1900)
-            .last()
+            .first()
             .expect("no UDP payload registered for port 1900");
         let expected =
             b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 5\r\nST: ssdp:all\r\n\r\n"
                 .to_vec();
         assert_eq!(*payload, expected);
+    }
+
+    #[test]
+    fn udp_ssdp_rootdevice_probe_follows_nmap() {
+        let expected: &[u8] =
+            b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 1\r\nST: upnp:rootdevice\r\n\r\n";
+        assert_eq!(payloads_for(1900).len(), 2);
+        assert_eq!(payloads_for(1900).last(), Some(&expected));
     }
 }

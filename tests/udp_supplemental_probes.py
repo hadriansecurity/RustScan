@@ -104,16 +104,18 @@ PROBES = {
     5006: [bytes.fromhex("5700 0000 0011 1107 0000 ffff 0300 00fe 0300 0014 001c 080a"
                          "0800 0000 0000 0000 0401 0101 0000 0000 01")],
     5094: [bytes.fromhex("0100 0000 5253 000d 01 00004e20")],
+    1900: [b'M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: "ssdp:discover"\r\n'
+           b"MX: 1\r\nST: upnp:rootdevice\r\n\r\n"],
     20000: [dnp3_request_link_status()],
     44818: [bytes.fromhex("6300 0000 00000000 00000000 c1debed1 00000000 00000000")],
 }
-# HART-IP devices may answer 5094 from a per-session port.
-REPLY_FROM_ANY_PORT = {5094}
-# Includes the retained Nmap variants on 443, 500, 2427, 3386, 34980, 47808 and 44818.
+# libupnp answers 1900 and HART-IP devices answer 5094 from another port.
+REPLY_FROM_ANY_PORT = {1900, 5094}
+# Includes the retained Nmap variants on 443, 500, 1900, 2427, 3386, 34980, 47808 and 44818.
 VARIANTS = {19: 1, 443: 4, 500: 5, 2362: 3, 3386: 2, 3702: 1, 4500: 2, 5093: 1,
             2427: 2, 2727: 1, 2944: 1, 2945: 1, 3671: 1, 4569: 1, 5783: 1,
             8805: 1, 9600: 1, 34980: 2, 47808: 2, 862: 1, 24224: 1,
-            5006: 1, 5094: 1, 20000: 1, 44818: 2}
+            5006: 1, 5094: 1, 20000: 1, 44818: 2, 1900: 2}
 
 
 def scan(port, host):
