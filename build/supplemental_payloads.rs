@@ -65,6 +65,84 @@ static TWAMP_TEST_PACKET: &[u8] = b"\x66\x78\x00\x01\xed\x5b\x2c\x00\x00\x00\x00
     \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
     \x00\x00\x00\x00\x00\x00";
 
+// Requests of the ethernetip, hartip, dnp3 and melsec-q UDP plugins in
+// hadriansecurity/fingerprintx#142.
+// Nmap's enip-info List Identity; Nmap only sends ONCRPC_CALL to 44818.
+static ENIP_LIST_IDENTITY: &[u8] = b"\x63\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+    \xc1\xde\xbe\xd1\x00\x00\x00\x00\x00\x00\x00\x00";
+// Session Initiate with a 20 s inactivity timer: the session is never closed,
+// and devices allow only a few.
+static HARTIP_SESSION_INITIATE: &[u8] = b"\x01\x00\x00\x00\x52\x53\x00\x0d\x01\x00\x00\x4e\x20";
+// The plcscan melsecq-discover-udp CPU info request, as a real Q03UDECPU
+// receives it; the length field (0x0014) counts the 20 bytes after offset 21.
+static MELSEC_CPU_INFO: &[u8] = b"\x57\x00\x00\x00\x00\x11\x11\x07\x00\x00\xff\xff\x03\x00\x00\xfe\
+    \x03\x00\x00\x14\x00\x1c\x08\x0a\x08\x00\x00\x00\x00\x00\x00\x00\x04\x01\x01\x01\
+    \x00\x00\x00\x00\x01";
+
+// An outstation answers only frames from its configured master to its own
+// address, so one datagram carries Request Link Status for every likely pair.
+const DNP3_MASTERS: [u16; 6] = [1, 0, 2, 3, 100, 1024];
+const DNP3_OUTSTATIONS: [u16; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 1024, 0xfffc];
+const DNP3_FRAME_LEN: usize = 10;
+const DNP3_PROBE_LEN: usize = DNP3_MASTERS.len() * DNP3_OUTSTATIONS.len() * DNP3_FRAME_LEN;
+
+// IEEE 1815 CRC: reflected polynomial 0xA6BC, complemented.
+const fn dnp3_crc(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    let mut i = 0;
+    while i < data.len() {
+        crc ^= data[i] as u16;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xa6bc
+            } else {
+                crc >> 1
+            };
+            bit += 1;
+        }
+        i += 1;
+    }
+    !crc
+}
+
+const fn dnp3_request_link_status() -> [u8; DNP3_PROBE_LEN] {
+    let mut probe = [0; DNP3_PROBE_LEN];
+    let mut offset = 0;
+    let mut m = 0;
+    while m < DNP3_MASTERS.len() {
+        let mut o = 0;
+        while o < DNP3_OUTSTATIONS.len() {
+            let (dst, src) = (DNP3_OUTSTATIONS[o], DNP3_MASTERS[m]);
+            // DIR and PRM set, function 9 (Request Link Status), no user data.
+            let header = [
+                0x05,
+                0x64,
+                0x05,
+                0xc9,
+                dst as u8,
+                (dst >> 8) as u8,
+                src as u8,
+                (src >> 8) as u8,
+            ];
+            let crc = dnp3_crc(&header);
+            let mut i = 0;
+            while i < header.len() {
+                probe[offset + i] = header[i];
+                i += 1;
+            }
+            probe[offset + 8] = crc as u8;
+            probe[offset + 9] = (crc >> 8) as u8;
+            offset += DNP3_FRAME_LEN;
+            o += 1;
+        }
+        m += 1;
+    }
+    probe
+}
+
+static DNP3_REQUEST_LINK_STATUS: [u8; DNP3_PROBE_LEN] = dnp3_request_link_status();
+
 // fingerprintx's IKEv2 IKE_SA_INIT (RFC 7296): AES-CBC, SHA2/SHA1, DH group 14.
 // Any value in [2, p-2] is a valid group 14 public key, so a fixed fill works.
 const IKEV2_SA_INIT_LEN: usize = 420;
@@ -137,11 +215,15 @@ pub static PROBES: &[(u16, &[u8])] = &[
     (4500, IKE_NAT_T),
     (4500, &IKEV2_SA_INIT_NAT_T),
     (4569, IAX2_POKE),
+    (5006, MELSEC_CPU_INFO),
     (5093, include_bytes!("../probes/zmap/sentinel_5093.pkt")),
+    (5094, HARTIP_SESSION_INITIATE),
     (5783, COAP_WELL_KNOWN_CORE),
     (8805, PFCP_HEARTBEAT),
     (9600, OMRON_FINS_CONTROLLER_DATA_READ),
+    (20000, &DNP3_REQUEST_LINK_STATUS),
     (24224, FLUENTD_HEARTBEAT),
     (34980, ETHERCAT_BROADCAST_READ),
+    (44818, ENIP_LIST_IDENTITY),
     (47808, BACNET_WHO_IS),
 ];
