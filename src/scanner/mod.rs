@@ -24,6 +24,13 @@ use tokio::io::Interest;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{sleep, timeout, timeout_at, Instant};
 
+/// UDP ports whose reply may come from another port of the target. UPnP Device
+/// Architecture 2.0 (1.3.3) fixes only where an M-SEARCH response goes, not its
+/// source port, a TFTP server answers from a new port (RFC 1350, section 4), and
+/// HART-IP devices may answer 5094 from a per-session port (5095 in
+/// automayt/ICS-pcap `hart_ip.pcap`).
+const REPLY_FROM_ANY_PORT: &[u16] = &[69, 1900, 5094];
+
 /// How many sockets the scan starts or finishes (counted together) between
 /// two polls of the runtime's I/O driver; see `Scanner::scan_sockets`.
 ///
@@ -312,9 +319,11 @@ impl Scanner {
     /// Note: `self` must contain `self.ip`.
     async fn scan_socket(&self, socket: SocketAddr) -> io::Result<PortStatus> {
         if self.udp {
-            return self
-                .scan_udp_socket(socket, payloads_for(socket.port()))
-                .await;
+            let payloads = payloads_for(socket.port());
+            if REPLY_FROM_ANY_PORT.contains(&socket.port()) {
+                return self.scan_udp_socket_any_port(socket, payloads).await;
+            }
+            return self.scan_udp_socket(socket, payloads).await;
         }
 
         let tries = self.tries.get();
@@ -410,6 +419,47 @@ impl Scanner {
                 Ok(Ok(size)) => return Ok(self.udp_open(socket, size)),
                 Ok(Err(e)) if e.kind() != io::ErrorKind::TimedOut => return Err(e),
                 _ => {}
+            }
+        }
+
+        Err(io::Error::other(format!(
+            "UDP scan timed-out for all tries on socket {socket}"
+        )))
+    }
+
+    /// Like `scan_udp_socket`, but on an unconnected socket that accepts a
+    /// reply from any port of the target's address. The kernel does not report
+    /// ICMP rejections on such a socket, so a closed port waits out every try.
+    async fn scan_udp_socket_any_port(
+        &self,
+        socket: SocketAddr,
+        payloads: &[&[u8]],
+    ) -> io::Result<PortStatus> {
+        const EMPTY_PROBE: &[&[u8]] = &[b""];
+        let payloads = if payloads.is_empty() {
+            EMPTY_PROBE
+        } else {
+            payloads
+        };
+
+        let udp_socket = UdpSocket::from_std(Self::udp_bind(socket)?)?;
+        let mut buf = [0u8; 1024];
+        for _ in 0..self.tries.get() {
+            let exchange = async {
+                for probe in payloads {
+                    udp_socket.send_to(probe, socket).await?;
+                }
+                loop {
+                    let (size, peer) = udp_socket.recv_from(&mut buf).await?;
+                    if peer.ip() == socket.ip() {
+                        return io::Result::Ok(size);
+                    }
+                }
+            };
+            match timeout(self.timeout, exchange).await {
+                Ok(Ok(size)) => return Ok(self.udp_open(socket, size)),
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {}
             }
         }
 
