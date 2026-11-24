@@ -107,6 +107,8 @@ PROBES = {
     20000: [dnp3_request_link_status()],
     44818: [bytes.fromhex("6300 0000 00000000 00000000 c1debed1 00000000 00000000")],
 }
+# HART-IP devices may answer 5094 from a per-session port.
+REPLY_FROM_ANY_PORT = {5094}
 # Includes the retained Nmap variants on 443, 500, 2427, 3386, 34980, 47808 and 44818.
 VARIANTS = {19: 1, 443: 4, 500: 5, 2362: 3, 3386: 2, 3702: 1, 4500: 2, 5093: 1,
             2427: 2, 2727: 1, 2944: 1, 2945: 1, 3671: 1, 4569: 1, 5783: 1,
@@ -168,8 +170,10 @@ class SupplementalProbes(unittest.TestCase):
                 worker.join(timeout=2)
             self.assertIn(accepted, received)
             self.assertNotIn(b"", received)
-            self.assertEqual(found, response == "same-peer")
-            if response != "same-peer":
+            answered = response == "same-peer" or (
+                response == "other-peer" and port in REPLY_FROM_ANY_PORT)
+            self.assertEqual(found, answered)
+            if not answered:
                 # Assert the actual retry budget, including preexisting probes.
                 self.assertEqual(len(received), VARIANTS[port] * 2)
                 self.assertEqual(len(set(received)), VARIANTS[port])

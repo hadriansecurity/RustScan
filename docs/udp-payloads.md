@@ -97,7 +97,12 @@ common outstation addresses, 0xFFFC (self address) included. An outstation in
 UDP-only mode that answers a configured master port instead of the request's
 source port stays silent. RustScan never closes the HART-IP session it opens,
 so the request asks for the 20 s timer `hartip-info` uses rather than the 60 s
-of the fingerprintx TCP plugin; the UDP plugin closes its own session. UDP/2222
+of the fingerprintx TCP plugin; the UDP plugin closes its own session. Some
+HART-IP devices answer the request from a per-session port (5095 in the
+automayt/ICS-pcap `hart_ip.pcap` capture), so 5094 is scanned on an unconnected
+socket that accepts a reply from any port of the target's address. That socket
+never sees ICMP rejections, so a closed 5094 waits out every try instead of
+ending early. UDP/2222
 (EtherNet/IP implicit I/O) gets no probe: it only carries cyclic data after a
 connection is opened over TCP/44818.
 
