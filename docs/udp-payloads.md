@@ -120,6 +120,13 @@ type 4 (network variables). `AUEP` is a call agent command, so a call agent on
 2727 may ignore it: Asterisk drops any AUEP whose endpoint does not name a
 configured gateway. fingerprintx sends the same request there.
 
+UDP/1900 also gets an M-SEARCH for `upnp:rootdevice` with `MX: 1` after
+Nmap's `UPNP_MSEARCH` (`ssdp:all`, `MX: 5`). libupnp delays its unicast reply
+by a random part of MX, up to about 3 s with Nmap's request, so it often misses
+a 500 ms timeout; with `MX: 1` gerbera 2.5.0 (libupnp 1.14.20) answered at once.
+miniupnpd answers `ssdp:all` with one datagram per device and service (13 in the
+lab) and `upnp:rootdevice` with one. libupnp ignored an M-SEARCH without MX.
+
 Two fingerprintx UDP plugins have no probe here. WireGuard silently drops any
 handshake whose MAC1 is not keyed to the server's public key, so no request can
 elicit a reply; fingerprintx falls back to a port-based heuristic. RDP-UDP
@@ -127,7 +134,7 @@ stays deferred as described below.
 
 The Nmap database and eligibility rules remain unchanged. SQL Browser is still
 excluded; RDP is deferred pending Windows validation. Including supplements,
-there are 33,128 covered ports, 33,232 pairs, and 93 ports with multiple variants.
+there are 33,128 covered ports, 33,233 pairs, and 94 ports with multiple variants.
 
 ## Packet budget
 
@@ -141,15 +148,15 @@ For ports **1–65535**, per target IP:
 | Measure | Nmap-only prerequisite | With supplements |
 | --- | ---: | ---: |
 | Ports with a specific probe | 33,110 | 33,128 |
-| Distinct (port, payload) pairs | 33,204 | 33,232 |
+| Distinct (port, payload) pairs | 33,204 | 33,233 |
 | Maximum variants on one port | 4 | 5 |
-| Maximum datagrams, `--tries 1` (default) | 65,629 | **65,639** |
-| Maximum datagrams, `--tries 2` | 131,258 | **131,278** |
+| Maximum datagrams, `--tries 1` (default) | 65,629 | **65,640** |
+| Maximum datagrams, `--tries 2` | 131,258 | **131,280** |
 
-The bound is `65,535 - 33,128 + 33,232 = 65,639` datagrams per attempt,
-ten more than Nmap alone: one extra QUIC variant, three Digi variants
+The bound is `65,535 - 33,128 + 33,233 = 65,640` datagrams per attempt,
+eleven more than Nmap alone: one extra QUIC variant, three Digi variants
 replacing one empty datagram, and the fingerprintx requests added beside the
-Nmap variants on 500, 2427, 3386, 34980, 47808 and 44818, plus IKEv2 beside the
+Nmap variants on 500, 1900, 2427, 3386, 34980, 47808 and 44818, plus IKEv2 beside the
 IKEv1 NAT-T variant on 4500. The other new probes replace empty
 datagrams without increasing the count. QUIC contributes 1200 payload bytes
 per attempt, and the DNP3 probe 840.
@@ -219,7 +226,7 @@ formatting, and the documentation build.
 
 The supplemental wire fixtures check every variant over IPv4 and IPv6, with
 silent, closed, and alternate-source-port controls and retry packet counts
-(218 scenarios). The NAT-T fixture independently encodes the IKE proposal and
+(228 scenarios). The NAT-T fixture independently encodes the IKE proposal and
 only responds to the complete framed request. Rust tests also verify its marker,
 IKE header and length, and agreement with the pinned Nmap IKE body. These checks
 validate wire delivery and classification; representative VPN gateway validation

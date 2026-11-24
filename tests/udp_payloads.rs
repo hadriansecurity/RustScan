@@ -243,7 +243,7 @@ fn vendored_database_coverage_and_packet_budget_are_preserved() {
     );
     assert_eq!(
         actual,
-        (33_128, 33_232, 93, Some(5)),
+        (33_128, 33_233, 94, Some(5)),
         "probe coverage changed: investigate lost probes or update after syncing the Nmap databases"
     );
 }
@@ -253,8 +253,8 @@ fn full_range_datagram_budget_includes_empty_fallbacks() {
     let per_attempt: usize = (1..=u16::MAX)
         .map(|port| payloads_for(port).len().max(1))
         .sum();
-    assert_eq!(per_attempt, 65_639);
-    assert_eq!(per_attempt * 2, 131_278);
+    assert_eq!(per_attempt, 65_640);
+    assert_eq!(per_attempt * 2, 131_280);
     assert!(payloads_for(0).is_empty());
 }
 

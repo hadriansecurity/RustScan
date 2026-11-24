@@ -177,6 +177,12 @@ const fn ikev2_sa_init(initiator_spi: [u8; 8]) -> [u8; IKEV2_SA_INIT_LEN] {
     packet
 }
 
+// Nmap's UPNP_MSEARCH asks for ssdp:all with MX 5: libupnp delays its reply by a
+// random part of MX, past a 500 ms timeout, and miniupnpd sends a datagram per
+// service. Root devices answer upnp:rootdevice (UPnP Device Architecture 2.0,
+// 1.3.3); libupnp ignored an M-SEARCH without MX in the lab, so MX is 1.
+static SSDP_ROOTDEVICE: &[u8] = b"M-SEARCH * HTTP/1.1\r\nHost: 239.255.255.250:1900\r\nMan: \"ssdp:discover\"\r\nMX: 1\r\nST: upnp:rootdevice\r\n\r\n";
+
 // RFC 3948 section 2.2: IKE on UDP/4500 follows a four-byte Non-ESP Marker.
 const fn with_non_esp_marker(message: [u8; IKEV2_SA_INIT_LEN]) -> [u8; IKEV2_SA_INIT_LEN + 4] {
     let mut packet = [0; IKEV2_SA_INIT_LEN + 4];
@@ -202,6 +208,7 @@ pub static PROBES: &[(u16, &[u8])] = &[
     (443, &QUIC),
     (862, TWAMP_TEST_PACKET),
     (500, &IKEV2_SA_INIT),
+    (1900, SSDP_ROOTDEVICE),
     (2362, include_bytes!("../probes/zmap/digi1_2362.pkt")),
     (2362, include_bytes!("../probes/zmap/digi2_2362.pkt")),
     (2362, include_bytes!("../probes/zmap/digi3_2362.pkt")),
