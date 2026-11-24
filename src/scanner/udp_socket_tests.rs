@@ -200,3 +200,93 @@ fn a_closed_port_fails_without_waiting_for_the_timeout() {
         }
     });
 }
+
+async fn scan_any_port(
+    target: SocketAddr,
+    reply_from: &str,
+    payloads: &[&'static [u8]],
+) -> io::Result<PortStatus> {
+    let server = UdpSocket::bind(target).await.unwrap();
+    let session = UdpSocket::bind(reply_from).await.unwrap();
+    let responder = spawn(async move {
+        let (_, peer) = receive(&server).await;
+        session.send_to(b"reply", peer).await.unwrap();
+    });
+    let status = udp_scanner(Duration::from_millis(500), 1)
+        .scan_udp_socket_any_port(target, payloads)
+        .await;
+    responder.await.unwrap();
+    status
+}
+
+fn free_port(address: &str) -> SocketAddr {
+    std::net::UdpSocket::bind(address)
+        .unwrap()
+        .local_addr()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "opens sockets; run by the UDP regression workflow"]
+fn any_port_scan_accepts_a_reply_from_another_port_of_the_target() {
+    block_on(async {
+        for address in ["127.0.0.1:0", "[::1]:0"] {
+            let status = scan_any_port(free_port(address), address, &[b"initiate"]).await;
+            assert!(
+                matches!(status, Ok(PortStatus::Open(_))),
+                "{}: {:?}",
+                address,
+                status
+            );
+        }
+    });
+}
+
+#[test]
+#[ignore = "opens sockets; run by the UDP regression workflow"]
+fn any_port_scan_ignores_a_reply_from_another_host() {
+    block_on(async {
+        // Linux routes all of 127.0.0.0/8 to the loopback interface.
+        let status = scan_any_port(free_port("127.0.0.1:0"), "127.0.0.2:0", &[b"initiate"]).await;
+        assert!(status.is_err(), "{:?}", status);
+    });
+}
+
+#[test]
+#[ignore = "opens sockets; run by the UDP regression workflow"]
+fn ssdp_reply_from_another_port_marks_the_port_open() {
+    block_on(async {
+        let server = UdpSocket::bind("127.0.0.1:1900").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let responder = spawn(async move {
+            let (payload, peer) = receive(&server).await;
+            assert!(payload.starts_with(b"M-SEARCH"));
+            let session = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            session
+                .send_to(b"HTTP/1.1 200 OK\r\n\r\n", peer)
+                .await
+                .unwrap();
+        });
+        let status = udp_scanner(Duration::from_millis(500), 1)
+            .scan_socket(target)
+            .await;
+        assert!(matches!(status, Ok(PortStatus::Open(_))), "{:?}", status);
+        responder.await.unwrap();
+    });
+}
+
+#[test]
+#[ignore = "opens sockets; run by the UDP regression workflow"]
+fn other_ports_still_fail_on_refusal_without_waiting() {
+    block_on(async {
+        let target = free_port("127.0.0.1:0");
+        assert!(!REPLY_FROM_ANY_PORT.contains(&target.port()));
+        let status = timeout(
+            Duration::from_secs(2),
+            udp_scanner(Duration::from_secs(3), 20).scan_socket(target),
+        )
+        .await
+        .expect("rejection did not end the scan");
+        assert_eq!(status.unwrap_err().kind(), io::ErrorKind::ConnectionRefused);
+    });
+}
